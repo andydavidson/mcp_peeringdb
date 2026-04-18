@@ -1,0 +1,23 @@
+[Unit]
+Description=PeeringDB MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=peeringdb-mcp
+WorkingDirectory=/opt/peeringdb-mcp
+ExecStart=/opt/peeringdb-mcp/venv/bin/uvicorn \
+    peeringdb_mcp.server:create_app \
+    --factory \
+    --host 127.0.0.1 \
+    --port 8001 \
+    --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=peeringdb-mcp
+
+[Install]
+WantedBy=multi-user.target

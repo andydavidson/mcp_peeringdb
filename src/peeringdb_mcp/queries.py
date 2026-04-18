@@ -1,0 +1,466 @@
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+
+_BASE_URL = "https://www.peeringdb.com/api/"
+_AUTH_PROFILE_URL = "https://auth.peeringdb.com/profile/v1"
+
+# Semaphore used to pace multi-request tools to ~1 req/s per PeeringDB guidelines.
+_RATE_LIMIT = asyncio.Semaphore(1)
+
+
+def _headers(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Api-Key {api_key}"}
+
+
+def _check_status(resp: httpx.Response) -> None:
+    if resp.status_code == 401:
+        raise ValueError("PeeringDB authentication failed — check your API key")
+    if resp.status_code == 403:
+        raise ValueError("PeeringDB API key lacks permission for this data")
+    if resp.status_code == 429:
+        raise ValueError("PeeringDB rate limit exceeded — retry in 1 second")
+    if resp.status_code >= 500:
+        raise ValueError(f"PeeringDB server error: {resp.status_code}")
+
+
+# ── Network tools ──────────────────────────────────────────────────────────────
+
+async def get_network_by_asn(api_key: str, asn: int) -> dict | None:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "net",
+                params={"asn": asn, "depth": 2},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    data = resp.json().get("data", [])
+    return data[0] if data else None
+
+
+async def get_network(api_key: str, id: int, depth: int = 2) -> dict | None:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                f"net/{id}",
+                params={"depth": depth},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    return resp.json().get("data")
+
+
+async def search_networks(
+    api_key: str,
+    name: str | None = None,
+    policy_general: str | None = None,
+    info_type: str | None = None,
+    country: str | None = None,
+    limit: int = 20,
+    skip: int = 0,
+) -> list:
+    params: dict = {"depth": 0, "limit": limit, "skip": skip}
+    if name:
+        params["name__contains"] = name
+    if policy_general:
+        params["policy_general"] = policy_general
+    if info_type:
+        params["info_type"] = info_type
+    if country:
+        params["country"] = country
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get("net", params=params, headers=_headers(api_key))
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_network_peering_points(
+    api_key: str, asn: int, limit: int = 100, skip: int = 0
+) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "netixlan",
+                params={"asn": asn, "depth": 0, "limit": limit, "skip": skip},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_network_facilities(api_key: str, asn: int, limit: int = 50) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        # Step 1: resolve ASN → net_id
+        async with _RATE_LIMIT:
+            try:
+                resp = await client.get(
+                    "net",
+                    params={"asn": asn, "fields": "id"},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp)
+        nets = resp.json().get("data", [])
+        if not nets:
+            return []
+        net_id = nets[0]["id"]
+
+        # Step 2: fetch netfac records
+        async with _RATE_LIMIT:
+            try:
+                resp2 = await client.get(
+                    "netfac",
+                    params={"net_id": net_id, "depth": 1, "limit": limit},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+    _check_status(resp2)
+    return resp2.json().get("data", [])
+
+
+# ── Internet Exchange tools ────────────────────────────────────────────────────
+
+async def get_exchange(api_key: str, id: int, depth: int = 2) -> dict | None:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                f"ix/{id}",
+                params={"depth": depth},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    return resp.json().get("data")
+
+
+async def search_exchanges(
+    api_key: str,
+    name: str | None = None,
+    country: str | None = None,
+    region_continent: str | None = None,
+    city: str | None = None,
+    limit: int = 20,
+    skip: int = 0,
+) -> list:
+    params: dict = {"depth": 0, "limit": limit, "skip": skip}
+    if name:
+        params["name__contains"] = name
+    if country:
+        params["country"] = country
+    if region_continent:
+        params["region_continent"] = region_continent
+    if city:
+        params["city"] = city
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get("ix", params=params, headers=_headers(api_key))
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_exchange_members(
+    api_key: str, ix_id: int, limit: int = 200, skip: int = 0
+) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "netixlan",
+                params={"ix_id": ix_id, "depth": 0, "limit": limit, "skip": skip},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+# ── Facility tools ─────────────────────────────────────────────────────────────
+
+async def get_facility(api_key: str, id: int, depth: int = 2) -> dict | None:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                f"fac/{id}",
+                params={"depth": depth},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    return resp.json().get("data")
+
+
+async def search_facilities(
+    api_key: str,
+    name: str | None = None,
+    city: str | None = None,
+    country: str | None = None,
+    limit: int = 20,
+    skip: int = 0,
+) -> list:
+    params: dict = {"depth": 0, "limit": limit, "skip": skip}
+    if name:
+        params["name__contains"] = name
+    if city:
+        params["city"] = city
+    if country:
+        params["country"] = country
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get("fac", params=params, headers=_headers(api_key))
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_facility_networks(
+    api_key: str, fac_id: int, limit: int = 100, skip: int = 0
+) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "netfac",
+                params={"fac_id": fac_id, "depth": 1, "limit": limit, "skip": skip},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_facility_exchanges(
+    api_key: str, fac_id: int, limit: int = 50
+) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "ixfac",
+                params={"fac_id": fac_id, "depth": 1, "limit": limit},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+# ── Cross-object / intelligence tools ─────────────────────────────────────────
+
+async def find_common_exchanges(api_key: str, asn_a: int, asn_b: int) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        # Step 1: netixlan for ASN A
+        async with _RATE_LIMIT:
+            try:
+                resp_a = await client.get(
+                    "netixlan",
+                    params={"asn": asn_a, "depth": 0, "limit": 500},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_a)
+        netixlans_a = resp_a.json().get("data", [])
+
+        # Step 2: netixlan for ASN B
+        async with _RATE_LIMIT:
+            try:
+                resp_b = await client.get(
+                    "netixlan",
+                    params={"asn": asn_b, "depth": 0, "limit": 500},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_b)
+        netixlans_b = resp_b.json().get("data", [])
+
+        # Step 3: intersect ix_ids
+        by_ix_a: dict[int, list] = {}
+        for r in netixlans_a:
+            by_ix_a.setdefault(r["ix_id"], []).append(r)
+
+        by_ix_b: dict[int, list] = {}
+        for r in netixlans_b:
+            by_ix_b.setdefault(r["ix_id"], []).append(r)
+
+        common_ix_ids = set(by_ix_a.keys()) & set(by_ix_b.keys())
+        if not common_ix_ids:
+            return []
+
+        # Step 4: fetch IX names
+        async with _RATE_LIMIT:
+            try:
+                resp_ix = await client.get(
+                    "ix",
+                    params={
+                        "id__in": ",".join(str(i) for i in sorted(common_ix_ids)),
+                        "fields": "id,name",
+                    },
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_ix)
+        ix_names = {r["id"]: r["name"] for r in resp_ix.json().get("data", [])}
+
+    # Step 5: build result
+    result = []
+    for ix_id in sorted(common_ix_ids):
+        result.append({
+            "ix_id": ix_id,
+            "ix_name": ix_names.get(ix_id, ""),
+            "network_a_entries": by_ix_a[ix_id],
+            "network_b_entries": by_ix_b[ix_id],
+        })
+    return result
+
+
+async def find_common_facilities(api_key: str, asn_a: int, asn_b: int) -> list:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        # Step 1: resolve ASN A → net_id
+        async with _RATE_LIMIT:
+            try:
+                resp_a = await client.get(
+                    "net",
+                    params={"asn": asn_a, "fields": "id"},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_a)
+        nets_a = resp_a.json().get("data", [])
+        if not nets_a:
+            return []
+        net_id_a = nets_a[0]["id"]
+
+        # Step 2: resolve ASN B → net_id
+        async with _RATE_LIMIT:
+            try:
+                resp_b = await client.get(
+                    "net",
+                    params={"asn": asn_b, "fields": "id"},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_b)
+        nets_b = resp_b.json().get("data", [])
+        if not nets_b:
+            return []
+        net_id_b = nets_b[0]["id"]
+
+        # Step 3: netfac for network A
+        async with _RATE_LIMIT:
+            try:
+                resp_fa = await client.get(
+                    "netfac",
+                    params={"net_id": net_id_a, "depth": 1},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_fa)
+        netfacs_a = resp_fa.json().get("data", [])
+
+        # Step 4: netfac for network B
+        async with _RATE_LIMIT:
+            try:
+                resp_fb = await client.get(
+                    "netfac",
+                    params={"net_id": net_id_b, "depth": 1},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_fb)
+        netfacs_b = resp_fb.json().get("data", [])
+
+    # Step 5: intersect on fac_id
+    by_fac_a = {r["fac_id"]: r for r in netfacs_a}
+    by_fac_b = {r["fac_id"]: r for r in netfacs_b}
+    common_fac_ids = set(by_fac_a.keys()) & set(by_fac_b.keys())
+
+    return [
+        {
+            "fac_id": fac_id,
+            "network_a_entry": by_fac_a[fac_id],
+            "network_b_entry": by_fac_b[fac_id],
+        }
+        for fac_id in sorted(common_fac_ids)
+    ]
+
+
+async def get_organisation(api_key: str, id: int) -> dict | None:
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                f"org/{id}",
+                params={"depth": 1},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    return resp.json().get("data")
+
+
+async def get_my_profile(api_key: str) -> dict | None:
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                _AUTH_PROFILE_URL,
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    if resp.status_code == 404:
+        return None
+    _check_status(resp)
+    return resp.json()
