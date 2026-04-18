@@ -17,5 +17,16 @@ dependencies = [
 [project.scripts]
 peeringdb-mcp = "peeringdb_mcp.__main__:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/peeringdb_mcp"]
