@@ -269,7 +269,7 @@ async def test_find_common_exchanges_found():
     with patch("asyncio.sleep"):
         netixlans_a = [{"ix_id": 26, "asn": 15169, "ipaddr4": "1.1.1.1"}]
         netixlans_b = [{"ix_id": 26, "asn": 32934, "ipaddr4": "2.2.2.2"}]
-        ix_data = [{"id": 26, "name": "AMS-IX"}]
+        ix_data = [{"id": 26, "name": "AMS-IX", "ixfac_set": []}]
 
         respx.get(f"{_API}/netixlan").mock(
             side_effect=[_ok(netixlans_a), _ok(netixlans_b)]
@@ -281,6 +281,25 @@ async def test_find_common_exchanges_found():
     assert len(result) == 1
     assert result[0]["ix_id"] == 26
     assert result[0]["ix_name"] == "AMS-IX"
+    assert "ixfac_set" in result[0]  # included for scope annotation
+
+
+@respx.mock
+async def test_find_common_exchanges_ix_fetched_at_depth2():
+    """Step 4 must use depth=2 so ixfac_set country data is available."""
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/netixlan").mock(
+            side_effect=[
+                _ok([{"ix_id": 26, "asn": 15169}]),
+                _ok([{"ix_id": 26, "asn": 32934}]),
+            ]
+        )
+        route = respx.get(f"{_API}/ix").mock(
+            return_value=_ok([{"id": 26, "name": "AMS-IX", "ixfac_set": []}])
+        )
+        await queries.find_common_exchanges(_KEY, 15169, 32934)
+
+    assert "depth=2" in str(route.calls[0].request.url)
 
 
 @respx.mock

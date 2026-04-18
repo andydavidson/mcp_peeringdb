@@ -44,6 +44,61 @@ def _dump(data: dict) -> str:
         return f'error = "TOML serialisation failed: {exc}"\n'
 
 
+# ── Exchange scope detection ───────────────────────────────────────────────────
+
+def _ix_countries(ix_data: dict) -> list[str]:
+    """Return sorted list of unique countries found in an IX's ixfac_set.
+
+    At depth=2, each ixfac entry has a nested 'fac' dict with a 'country' field.
+    Returns an empty list when ixfac_set is absent or contains no country data.
+    """
+    countries: set[str] = set()
+    for ixfac in (ix_data.get("ixfac_set") or []):
+        if not isinstance(ixfac, dict):
+            continue
+        fac = ixfac.get("fac") or {}
+        country = (
+            (fac.get("country") if isinstance(fac, dict) else None)
+            or ixfac.get("country")
+            or ""
+        ).strip()
+        if country:
+            countries.add(country)
+    return sorted(countries)
+
+
+def _annotate_ix_scope(ix_data: dict) -> dict:
+    """Add ix_scope, ix_countries_present, and scope_warning to an IX dict.
+
+    Modifies the dict in place and returns it.
+    ix_scope values:
+      "local"              — all known facilities in one country (or only one found)
+      "regional_dispersed" — facilities confirmed in more than one country
+      "unknown"            — no facility country data available
+    """
+    countries = _ix_countries(ix_data)
+    ix_data["ix_countries_present"] = countries
+
+    if len(countries) > 1:
+        ix_data["ix_scope"] = "regional_dispersed"
+        ix_data["scope_warning"] = (
+            f"DISPERSED EXCHANGE — NOT A LOCAL IXP: This exchange has infrastructure "
+            f"in {len(countries)} countries ({', '.join(countries)}). Unlike a true "
+            "internet exchange point, which connects networks in close proximity, "
+            "this exchange spans multiple countries. Traffic between members may "
+            "traverse long-haul inter-country links within the exchange fabric, "
+            "delivering the latency characteristics of long-distance transit while "
+            "appearing as local peering. Do not assume low-latency paths — verify "
+            "that your peer's port is at the same physical facility as your own."
+        )
+    elif len(countries) == 1:
+        ix_data["ix_scope"] = "local"
+    else:
+        ix_data["ix_scope"] = "unknown"
+
+    return ix_data
+
+
 # ── Tool definitions ───────────────────────────────────────────────────────────
 
 _API_KEY_PARAM = {
@@ -590,7 +645,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         result = await queries.get_exchange(api_key, id_, depth=depth)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"exchange": result})
+        return _dump({"exchange": _annotate_ix_scope(result)})
 
     elif name == "search_exchanges":
         limit = int(args.get("limit", 20))
@@ -655,6 +710,9 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         asn_a = int(args["asn_a"])
         asn_b = int(args["asn_b"])
         rows = await queries.find_common_exchanges(api_key, asn_a, asn_b)
+        for row in rows:
+            _annotate_ix_scope(row)
+            row.pop("ixfac_set", None)  # strip raw facility data after annotation
         return _dump({"common_exchanges": rows})
 
     elif name == "find_common_facilities":

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from peeringdb_mcp.server import _clean, _dispatch, _dump, call_tool
+from peeringdb_mcp.server import _annotate_ix_scope, _clean, _dispatch, _dump, _ix_countries, call_tool
 from mcp import types
 
 
@@ -238,6 +238,170 @@ async def test_dispatch_search_ix_pricing_limit_capped_at_158():
     import re
     m = re.search(r"count = (\d+)", result)
     assert m and int(m.group(1)) <= 158
+
+
+# ── _ix_countries ─────────────────────────────────────────────────────────────
+
+def test_ix_countries_empty_ixfac_set():
+    assert _ix_countries({"ixfac_set": []}) == []
+
+
+def test_ix_countries_no_ixfac_set_key():
+    assert _ix_countries({}) == []
+
+
+def test_ix_countries_single_country():
+    ix = {"ixfac_set": [{"fac": {"country": "NL"}}, {"fac": {"country": "NL"}}]}
+    assert _ix_countries(ix) == ["NL"]
+
+
+def test_ix_countries_multiple_countries():
+    ix = {
+        "ixfac_set": [
+            {"fac": {"country": "NL"}},
+            {"fac": {"country": "DE"}},
+            {"fac": {"country": "IE"}},
+        ]
+    }
+    assert _ix_countries(ix) == ["DE", "IE", "NL"]  # sorted
+
+
+def test_ix_countries_fallback_to_ixfac_country():
+    # When fac is absent, fall back to country on the ixfac object itself
+    ix = {"ixfac_set": [{"country": "FR"}]}
+    assert _ix_countries(ix) == ["FR"]
+
+
+def test_ix_countries_skips_non_dict_entries():
+    ix = {"ixfac_set": [42, None, {"fac": {"country": "US"}}]}
+    assert _ix_countries(ix) == ["US"]
+
+
+def test_ix_countries_skips_empty_country():
+    ix = {"ixfac_set": [{"fac": {"country": ""}}, {"fac": {"country": "SE"}}]}
+    assert _ix_countries(ix) == ["SE"]
+
+
+# ── _annotate_ix_scope ─────────────────────────────────────────────────────────
+
+def test_annotate_scope_local_single_country():
+    ix = {"name": "AMS-IX", "ixfac_set": [{"fac": {"country": "NL"}}]}
+    result = _annotate_ix_scope(ix)
+    assert result["ix_scope"] == "local"
+    assert result["ix_countries_present"] == ["NL"]
+    assert "scope_warning" not in result
+
+
+def test_annotate_scope_regional_multi_country():
+    ix = {
+        "name": "NL-ix",
+        "ixfac_set": [
+            {"fac": {"country": "NL"}},
+            {"fac": {"country": "DE"}},
+            {"fac": {"country": "IE"}},
+        ],
+    }
+    result = _annotate_ix_scope(ix)
+    assert result["ix_scope"] == "regional_dispersed"
+    assert set(result["ix_countries_present"]) == {"NL", "DE", "IE"}
+    assert "scope_warning" in result
+    warning = result["scope_warning"]
+    assert "DISPERSED EXCHANGE" in warning
+    assert "NOT A LOCAL IXP" in warning
+    assert "3 countries" in warning
+    assert "long-haul" in warning
+
+
+def test_annotate_scope_unknown_no_facility_data():
+    ix = {"name": "MYSTERY-IX", "ixfac_set": []}
+    result = _annotate_ix_scope(ix)
+    assert result["ix_scope"] == "unknown"
+    assert result["ix_countries_present"] == []
+    assert "scope_warning" not in result
+
+
+def test_annotate_scope_modifies_in_place():
+    ix = {"name": "TEST-IX", "ixfac_set": [{"fac": {"country": "US"}}]}
+    returned = _annotate_ix_scope(ix)
+    assert returned is ix  # same object
+
+
+def test_annotate_scope_regional_lists_countries_in_warning():
+    ix = {
+        "ixfac_set": [
+            {"fac": {"country": "GB"}},
+            {"fac": {"country": "FR"}},
+        ]
+    }
+    _annotate_ix_scope(ix)
+    assert "FR" in ix["scope_warning"]
+    assert "GB" in ix["scope_warning"]
+
+
+# ── _dispatch: scope annotation on get_exchange ─────────────────────────────
+
+async def test_dispatch_get_exchange_local_scope():
+    ix = {"id": 1, "name": "LOCAL-IX", "ixfac_set": [{"fac": {"country": "NL"}}]}
+    with patch("peeringdb_mcp.server.queries.get_exchange", new=AsyncMock(return_value=ix)):
+        result = await _dispatch("get_exchange", {"id": "1"}, "key")
+    assert 'ix_scope = "local"' in result
+    assert "scope_warning" not in result
+
+
+async def test_dispatch_get_exchange_regional_scope():
+    ix = {
+        "id": 99,
+        "name": "NL-ix",
+        "ixfac_set": [
+            {"fac": {"country": "NL"}},
+            {"fac": {"country": "IE"}},
+            {"fac": {"country": "DE"}},
+        ],
+    }
+    with patch("peeringdb_mcp.server.queries.get_exchange", new=AsyncMock(return_value=ix)):
+        result = await _dispatch("get_exchange", {"id": "99"}, "key")
+    assert 'ix_scope = "regional_dispersed"' in result
+    assert "DISPERSED EXCHANGE" in result
+
+
+# ── _dispatch: scope annotation on find_common_exchanges ────────────────────
+
+async def test_dispatch_find_common_exchanges_annotates_scope():
+    common = [
+        {
+            "ix_id": 26,
+            "ix_name": "AMS-IX",
+            "ixfac_set": [{"fac": {"country": "NL"}}],
+            "network_a_entries": [],
+            "network_b_entries": [],
+        }
+    ]
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=common)):
+        result = await _dispatch("find_common_exchanges", {"asn_a": "15169", "asn_b": "32934"}, "key")
+    assert "common_exchanges" in result
+    assert "ix_scope" in result
+    # ixfac_set must be stripped from the output
+    assert "ixfac_set" not in result
+
+
+async def test_dispatch_find_common_exchanges_regional_flagged():
+    common = [
+        {
+            "ix_id": 999,
+            "ix_name": "NL-ix",
+            "ixfac_set": [
+                {"fac": {"country": "NL"}},
+                {"fac": {"country": "IE"}},
+            ],
+            "network_a_entries": [],
+            "network_b_entries": [],
+        }
+    ]
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=common)):
+        result = await _dispatch("find_common_exchanges", {"asn_a": "1", "asn_b": "2"}, "key")
+    assert "regional_dispersed" in result
+    assert "DISPERSED EXCHANGE" in result
+    assert "ixfac_set" not in result
 
 
 # ── create_app ─────────────────────────────────────────────────────────────────

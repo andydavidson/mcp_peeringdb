@@ -324,14 +324,14 @@ async def find_common_exchanges(api_key: str, asn_a: int, asn_b: int) -> list:
         if not common_ix_ids:
             return []
 
-        # Step 4: fetch IX names
+        # Step 4: fetch IX data at depth=2 to get name and ixfac_set (for scope detection)
         async with _RATE_LIMIT:
             try:
                 resp_ix = await client.get(
                     "ix",
                     params={
                         "id__in": ",".join(str(i) for i in sorted(common_ix_ids)),
-                        "fields": "id,name",
+                        "depth": 2,
                     },
                     headers=_headers(api_key),
                 )
@@ -340,14 +340,16 @@ async def find_common_exchanges(api_key: str, asn_a: int, asn_b: int) -> list:
             await asyncio.sleep(1)
 
         _check_status(resp_ix)
-        ix_names = {r["id"]: r["name"] for r in resp_ix.json().get("data", [])}
+        ix_by_id = {r["id"]: r for r in resp_ix.json().get("data", [])}
 
-    # Step 5: build result
+    # Step 5: build result; include ixfac_set so server.py can annotate scope
     result = []
     for ix_id in sorted(common_ix_ids):
+        ix = ix_by_id.get(ix_id, {})
         result.append({
             "ix_id": ix_id,
-            "ix_name": ix_names.get(ix_id, ""),
+            "ix_name": ix.get("name", ""),
+            "ixfac_set": ix.get("ixfac_set", []),
             "network_a_entries": by_ix_a[ix_id],
             "network_b_entries": by_ix_b[ix_id],
         })
