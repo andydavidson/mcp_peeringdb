@@ -26,6 +26,29 @@ def _single_ok(data) -> httpx.Response:
     return httpx.Response(200, json={"data": data})
 
 
+def _single_ok_list(data) -> httpx.Response:
+    """Simulate PeeringDB wrapping a single record in a list (seen at depth=2)."""
+    return httpx.Response(200, json={"data": [data]})
+
+
+# ── _unwrap_single ─────────────────────────────────────────────────────────────
+
+def test_unwrap_single_dict():
+    assert queries._unwrap_single({"id": 1}) == {"id": 1}
+
+
+def test_unwrap_single_list_one_element():
+    assert queries._unwrap_single([{"id": 1}]) == {"id": 1}
+
+
+def test_unwrap_single_empty_list():
+    assert queries._unwrap_single([]) is None
+
+
+def test_unwrap_single_none():
+    assert queries._unwrap_single(None) is None
+
+
 # ── get_network_by_asn ─────────────────────────────────────────────────────────
 
 @respx.mock
@@ -93,6 +116,15 @@ async def test_get_network_not_found():
     respx.get(f"{_API}/net/99").mock(return_value=httpx.Response(404))
     result = await queries.get_network(_KEY, 99)
     assert result is None
+
+
+@respx.mock
+async def test_get_network_depth2_list_wrapped():
+    """PeeringDB wraps the record in a list at depth=2."""
+    net = {"id": 42, "name": "Cloudflare"}
+    respx.get(f"{_API}/net/42").mock(return_value=_single_ok_list(net))
+    result = await queries.get_network(_KEY, 42)
+    assert result == net
 
 
 # ── search_networks ────────────────────────────────────────────────────────────
@@ -174,6 +206,15 @@ async def test_get_exchange_not_found():
     assert result is None
 
 
+@respx.mock
+async def test_get_exchange_depth2_list_wrapped():
+    """PeeringDB wraps the record in a list at depth=2 — must still return a dict."""
+    ix = {"id": 26, "name": "AMS-IX", "ixfac_set": [{"fac": {"country": "NL"}}]}
+    respx.get(f"{_API}/ix/26").mock(return_value=_single_ok_list(ix))
+    result = await queries.get_exchange(_KEY, 26)
+    assert result == ix
+
+
 # ── search_exchanges ───────────────────────────────────────────────────────────
 
 @respx.mock
@@ -223,6 +264,14 @@ async def test_get_facility_not_found():
     respx.get(f"{_API}/fac/9999").mock(return_value=httpx.Response(404))
     result = await queries.get_facility(_KEY, 9999)
     assert result is None
+
+
+@respx.mock
+async def test_get_facility_depth2_list_wrapped():
+    fac = {"id": 1, "name": "Equinix AM1"}
+    respx.get(f"{_API}/fac/1").mock(return_value=_single_ok_list(fac))
+    result = await queries.get_facility(_KEY, 1)
+    assert result == fac
 
 
 # ── search_facilities ──────────────────────────────────────────────────────────
@@ -369,6 +418,14 @@ async def test_get_organisation_not_found():
     respx.get(f"{_API}/org/9999").mock(return_value=httpx.Response(404))
     result = await queries.get_organisation(_KEY, 9999)
     assert result is None
+
+
+@respx.mock
+async def test_get_organisation_depth2_list_wrapped():
+    org = {"id": 1, "name": "Google LLC"}
+    respx.get(f"{_API}/org/1").mock(return_value=_single_ok_list(org))
+    result = await queries.get_organisation(_KEY, 1)
+    assert result == org
 
 
 # ── get_my_profile ─────────────────────────────────────────────────────────────

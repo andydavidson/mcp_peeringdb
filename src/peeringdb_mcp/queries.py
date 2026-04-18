@@ -17,6 +17,18 @@ def _headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Api-Key {api_key}"}
 
 
+def _unwrap_single(data: dict | list | None) -> dict | None:
+    """Normalise PeeringDB single-record responses.
+
+    PeeringDB returns the data field as a plain dict for shallow depths but
+    wraps it in a list at depth=2. Accept either form and always return a
+    dict (or None when nothing was found).
+    """
+    if isinstance(data, list):
+        return data[0] if data else None
+    return data  # dict or None
+
+
 def _check_status(resp: httpx.Response) -> None:
     if resp.status_code == 401:
         raise ValueError("PeeringDB authentication failed — check your API key")
@@ -60,7 +72,7 @@ async def get_network(api_key: str, id: int, depth: int = 2) -> dict | None:
     if resp.status_code == 404:
         return None
     _check_status(resp)
-    return resp.json().get("data")
+    return _unwrap_single(resp.json().get("data"))
 
 
 async def search_networks(
@@ -157,7 +169,7 @@ async def get_exchange(api_key: str, id: int, depth: int = 2) -> dict | None:
     if resp.status_code == 404:
         return None
     _check_status(resp)
-    return resp.json().get("data")
+    return _unwrap_single(resp.json().get("data"))
 
 
 async def search_exchanges(
@@ -218,7 +230,7 @@ async def get_facility(api_key: str, id: int, depth: int = 2) -> dict | None:
     if resp.status_code == 404:
         return None
     _check_status(resp)
-    return resp.json().get("data")
+    return _unwrap_single(resp.json().get("data"))
 
 
 async def search_facilities(
@@ -452,7 +464,7 @@ async def get_organisation(api_key: str, id: int) -> dict | None:
     if resp.status_code == 404:
         return None
     _check_status(resp)
-    return resp.json().get("data")
+    return _unwrap_single(resp.json().get("data"))
 
 
 async def get_my_profile(api_key: str) -> dict | None:
