@@ -10,7 +10,7 @@ ExecStart=/opt/peeringdb-mcp/venv/bin/uvicorn \
     peeringdb_mcp.server:create_app \
     --factory \
     --host 127.0.0.1 \
-    --port 8001 \
+    --port 8002 \
     --workers 1
 Restart=on-failure
 RestartSec=5

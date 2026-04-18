@@ -79,7 +79,7 @@ In `call_tool()`:
 
 ## __main__.py
 
-Exactly as the blueprint. Port 8001. `factory=True`. `workers=1`.
+Exactly as the blueprint. Port 8002. `factory=True`. `workers=1`.
 
 ## Dependencies
 
@@ -125,7 +125,7 @@ should not be added.
 python -m peeringdb_mcp
 
 # Smoke test — server should respond (no 401, no auth required at MCP level)
-curl http://localhost:8001/
+curl http://localhost:8002/
 
 # Test a tool call via mcp CLI or Claude Desktop
 # Supply your PeeringDB API key as the peeringdb_api_key tool argument
@@ -152,7 +152,7 @@ See `MCP_SERVER_BLUEPRINT.md` §Common mistakes. In addition:
 - [ ] `deploy/nginx-peeringdb-mcp.conf` written — SSE settings + IP allowlist if needed
 - [ ] `deploy/peeringdb-mcp.service` written — `--workers 1`
 - [ ] `systemctl enable --now peeringdb-mcp`
-- [ ] Smoke test: `curl http://localhost:8001/` returns MCP response (not 401)
+- [ ] Smoke test: `curl http://localhost:8002/` returns MCP response (not 401)
 - [ ] Tool call succeeds with valid `peeringdb_api_key` in arguments
 - [ ] Tool call returns clean error when `peeringdb_api_key` is omitted
 - [ ] Tool call returns clean error when `peeringdb_api_key` is invalid (PeeringDB 401)

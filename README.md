@@ -52,12 +52,12 @@ pip install -e .
 python -m peeringdb_mcp
 ```
 
-The server listens on `http://127.0.0.1:8001` by default.
+The server listens on `http://127.0.0.1:8002` by default.
 
 ### Smoke test
 
 ```bash
-curl http://localhost:8001/
+curl http://localhost:8002/
 ```
 
 ## Connecting to Claude
@@ -65,7 +65,7 @@ curl http://localhost:8001/
 ### Claude Desktop / Claude.ai
 
 1. Settings → Model Context Protocol → Add remote server
-2. URL: `http://127.0.0.1:8001/` (local) or `https://<your-domain>/mcp/` (production)
+2. URL: `http://127.0.0.1:8002/` (local) or `https://<your-domain>/mcp/` (production)
 3. No custom headers or auth tokens needed at the MCP level
 
 Then add your PeeringDB API key to your Claude project instructions:
@@ -89,7 +89,7 @@ response = client.beta.messages.create(
         "type": "mcp",
         "server": {
             "type": "url",
-            "url": "http://127.0.0.1:8001/",
+            "url": "http://127.0.0.1:8002/",
         },
     }],
     messages=[{
@@ -126,7 +126,7 @@ sudo journalctl -u peeringdb-mcp -f
 ```
 src/peeringdb_mcp/
 ├── __init__.py
-├── __main__.py   # uvicorn entry point (port 8001)
+├── __main__.py   # uvicorn entry point (port 8002)
 ├── server.py     # MCP tool definitions, dispatch, app factory
 └── queries.py    # async PeeringDB API client functions
 

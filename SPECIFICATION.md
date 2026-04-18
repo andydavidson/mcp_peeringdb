@@ -18,7 +18,7 @@ Claude.ai / MCP client
         │  HTTPS  (no MCP-level auth — open at MCP layer)
         ▼
 nginx  (:443)
-  /mcp/  → proxy to uvicorn :8001
+  /mcp/  → proxy to uvicorn :8002
            (optional: IP allowlist in nginx for network-level restriction)
         │
         ▼
@@ -547,7 +547,7 @@ and `find_common_facilities`). Single-request tools do not need the semaphore.
 # deploy/nginx-peeringdb-mcp.conf — include from your server block
 
 upstream peeringdb_mcp {
-    server 127.0.0.1:8001;
+    server 127.0.0.1:8002;
     keepalive 8;
 }
 
@@ -593,7 +593,7 @@ ExecStart=/opt/peeringdb-mcp/venv/bin/uvicorn \
     peeringdb_mcp.server:create_app \
     --factory \
     --host 127.0.0.1 \
-    --port 8001 \
+    --port 8002 \
     --workers 1
 Restart=on-failure
 RestartSec=5
