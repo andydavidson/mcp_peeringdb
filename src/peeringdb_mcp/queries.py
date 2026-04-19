@@ -593,6 +593,8 @@ async def get_ix_traffic(
         )
 
     raw = resp.json()
+    # IXP Manager v5+ wraps stats under a "statistics" key; older versions return them flat.
+    stats = raw.get("statistics") if isinstance(raw.get("statistics"), dict) else raw
 
     return {
         "ix_id": ix_id,
@@ -600,14 +602,14 @@ async def get_ix_traffic(
         "period": period,
         "category": category,
         "traffic_url": json_url,
-        "current_in_bps": raw.get("curin"),
-        "current_out_bps": raw.get("curout"),
-        "average_in_bps": raw.get("averagein"),
-        "average_out_bps": raw.get("averageout"),
-        "peak_in_bps": raw.get("maxin"),
-        "peak_out_bps": raw.get("maxout"),
-        "peak_in_at": raw.get("maxinat"),
-        "peak_out_at": raw.get("maxoutat"),
-        "total_in_bits": raw.get("totalin"),
-        "total_out_bits": raw.get("totalout"),
+        "current_in_bps": stats.get("curin"),
+        "current_out_bps": stats.get("curout"),
+        "average_in_bps": stats.get("averagein"),
+        "average_out_bps": stats.get("averageout"),
+        "peak_in_bps": stats.get("maxin"),
+        "peak_out_bps": stats.get("maxout"),
+        "peak_in_at": stats.get("maxinat"),
+        "peak_out_at": stats.get("maxoutat"),
+        "total_in_bits": stats.get("totalin"),
+        "total_out_bits": stats.get("totalout"),
     }
