@@ -164,10 +164,22 @@ async def test_search_networks_401_raises():
 
 @respx.mock
 async def test_get_network_peering_points():
-    points = [{"ix_id": 1, "ipaddr4": "1.2.3.4"}]
-    respx.get(f"{_API}/netixlan").mock(return_value=_ok(points))
-    result = await queries.get_network_peering_points(_KEY, 15169)
-    assert result == points
+    with patch("asyncio.sleep"):
+        points = [{"ix_id": 1, "asn": 15169, "ipaddr4": "1.2.3.4"}]
+        respx.get(f"{_API}/netixlan").mock(return_value=_ok(points))
+        respx.get(f"{_API}/ix").mock(return_value=_ok([{"id": 1, "name": "AMS-IX"}]))
+        result = await queries.get_network_peering_points(_KEY, 15169)
+    assert len(result) == 1
+    assert result[0]["ix_name"] == "AMS-IX"
+    assert result[0]["ix_id"] == 1
+
+
+@respx.mock
+async def test_get_network_peering_points_empty():
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/netixlan").mock(return_value=_ok([]))
+        result = await queries.get_network_peering_points(_KEY, 15169)
+    assert result == []
 
 
 # ── get_network_facilities ─────────────────────────────────────────────────────
@@ -316,8 +328,8 @@ async def test_get_facility_exchanges():
 @respx.mock
 async def test_find_common_exchanges_found():
     with patch("asyncio.sleep"):
-        netixlans_a = [{"ix_id": 26, "asn": 15169, "ipaddr4": "1.1.1.1"}]
-        netixlans_b = [{"ix_id": 26, "asn": 32934, "ipaddr4": "2.2.2.2"}]
+        netixlans_a = [{"ix_id": 26, "asn": 15169, "name": "Google LLC", "ipaddr4": "1.1.1.1"}]
+        netixlans_b = [{"ix_id": 26, "asn": 32934, "name": "Meta", "ipaddr4": "2.2.2.2"}]
         ix_data = [{"id": 26, "name": "AMS-IX", "ixfac_set": []}]
 
         respx.get(f"{_API}/netixlan").mock(
@@ -328,9 +340,14 @@ async def test_find_common_exchanges_found():
         result = await queries.find_common_exchanges(_KEY, 15169, 32934)
 
     assert len(result) == 1
-    assert result[0]["ix_id"] == 26
-    assert result[0]["ix_name"] == "AMS-IX"
-    assert "ixfac_set" in result[0]  # included for scope annotation
+    row = result[0]
+    assert row["ix_id"] == 26
+    assert row["ix_name"] == "AMS-IX"
+    assert "ixfac_set" in row  # included for scope annotation
+    assert row["asn_a"] == 15169
+    assert row["network_a_name"] == "Google LLC"
+    assert row["asn_b"] == 32934
+    assert row["network_b_name"] == "Meta"
 
 
 @respx.mock
@@ -373,16 +390,31 @@ async def test_find_common_facilities_found():
         respx.get(f"{_API}/net").mock(
             side_effect=[_ok([{"id": 10}]), _ok([{"id": 20}])]
         )
+        netfac_a = {
+            "fac_id": 99,
+            "net_id": 10,
+            "fac": {"name": "Equinix AM1", "city": "Amsterdam", "country": "NL"},
+            "net": {"name": "Google LLC", "asn": 15169},
+        }
+        netfac_b = {
+            "fac_id": 99,
+            "net_id": 20,
+            "fac": {"name": "Equinix AM1", "city": "Amsterdam", "country": "NL"},
+            "net": {"name": "Meta", "asn": 32934},
+        }
         respx.get(f"{_API}/netfac").mock(
-            side_effect=[
-                _ok([{"fac_id": 99, "name": "Equinix AM1"}]),
-                _ok([{"fac_id": 99, "name": "Equinix AM1"}]),
-            ]
+            side_effect=[_ok([netfac_a]), _ok([netfac_b])]
         )
         result = await queries.find_common_facilities(_KEY, 15169, 32934)
 
     assert len(result) == 1
-    assert result[0]["fac_id"] == 99
+    row = result[0]
+    assert row["fac_id"] == 99
+    assert row["facility_name"] == "Equinix AM1"
+    assert row["asn_a"] == 15169
+    assert row["network_a_name"] == "Google LLC"
+    assert row["asn_b"] == 32934
+    assert row["network_b_name"] == "Meta"
 
 
 @respx.mock
