@@ -16,7 +16,30 @@ from . import queries
 
 log = logging.getLogger(__name__)
 
-mcp = Server("peeringdb-mcp")
+
+# ── Grounding constants ────────────────────────────────────────────────────────
+
+_SERVER_INSTRUCTIONS = (
+    "You are connected to a live PeeringDB data source. Follow these rules strictly:\n"
+    "1. For ANY question about a network, AS number, internet exchange, or facility, "
+    "call the appropriate tool first — never answer from training data, which is stale "
+    "and often wrong (network names, operators, and peering data change constantly).\n"
+    "2. Report ONLY the field values returned by the tool call. Do not add, infer, "
+    "correct, or supplement any value using prior knowledge.\n"
+    "3. If a field is absent from the tool result, say it is not recorded in PeeringDB "
+    "— do not guess or fill it in from memory.\n"
+    "4. ASN-to-operator mappings and network names change; always use the live tool "
+    "result, never your training data."
+)
+
+_GROUNDING = (
+    "Source: PeeringDB live API — authoritative real-time data. "
+    "IMPORTANT: Report only the field values present in this result. "
+    "Do not supplement, infer, or override any value from prior knowledge. "
+    "If a field is absent, say it is not recorded — do not guess."
+)
+
+mcp = Server("peeringdb-mcp", instructions=_SERVER_INSTRUCTIONS)
 
 
 # ── Serialisation ──────────────────────────────────────────────────────────────
@@ -42,6 +65,18 @@ def _dump(data: dict) -> str:
         return tomli_w.dumps(_clean(data))
     except Exception as exc:
         return f'error = "TOML serialisation failed: {exc}"\n'
+
+
+def _result(data: dict) -> str:
+    return _dump({**data, "_data_policy": _GROUNDING})
+
+
+def _desc(text: str) -> str:
+    return (
+        text
+        + " Returns live data from PeeringDB."
+        " Report only what this tool returns — do not use prior knowledge."
+    )
 
 
 # ── Exchange scope detection ───────────────────────────────────────────────────
@@ -118,7 +153,7 @@ async def list_tools() -> list[types.Tool]:
         # ── Network tools ──────────────────────────────────────────────────────
         types.Tool(
             name="get_network_by_asn",
-            description=(
+            description=_desc(
                 "Look up a network by AS number. Returns the full network record "
                 "including name, peering policy (policy_general), NOC contact info, "
                 "info_prefixes4/6, netixlan_set (peering points), and netfac_set "
@@ -138,7 +173,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_network",
-            description=(
+            description=_desc(
                 "Look up a network by its PeeringDB network ID. Returns the full "
                 "network record. Use get_network_by_asn instead if you have an ASN."
             ),
@@ -158,7 +193,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search_networks",
-            description=(
+            description=_desc(
                 "Search for networks by name, peering policy, network type, or country. "
                 "Returns a list of network records (depth=0). "
                 "policy_general values: Open, Selective, Restrictive, No. "
@@ -204,7 +239,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_network_peering_points",
-            description=(
+            description=_desc(
                 "Return all IX peering points (netixlan records) for a network identified "
                 "by ASN. Each record includes ix_id, ixlan_id, ipaddr4, ipaddr6, speed "
                 "(Mbps), and is_rs_peer (route-server peer flag). "
@@ -231,7 +266,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_network_facilities",
-            description=(
+            description=_desc(
                 "Return all colocation facilities where a network is present, identified "
                 "by ASN. Each record includes fac_id, facility name, city, and country."
             ),
@@ -252,7 +287,7 @@ async def list_tools() -> list[types.Tool]:
         # ── Internet Exchange tools ────────────────────────────────────────────
         types.Tool(
             name="get_exchange",
-            description=(
+            description=_desc(
                 "Retrieve a single internet exchange by PeeringDB IX ID. "
                 "Returns name, name_long, country, region_continent, net_count, "
                 "and ixlan_set (LAN segments with prefix info)."
@@ -273,7 +308,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search_exchanges",
-            description=(
+            description=_desc(
                 "Search internet exchanges by name, country, continent, or city. "
                 "Returns a list of IX records. "
                 "region_continent values: Africa, Asia Pacific, Australia, Europe, "
@@ -312,7 +347,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_exchange_members",
-            description=(
+            description=_desc(
                 "Return all networks (netixlan records) present at an internet exchange. "
                 "Each record includes asn, net_id, ipaddr4, ipaddr6, speed (Mbps), "
                 "and is_rs_peer. Useful for listing who peers at a given IX."
@@ -339,7 +374,7 @@ async def list_tools() -> list[types.Tool]:
         # ── Facility tools ─────────────────────────────────────────────────────
         types.Tool(
             name="get_facility",
-            description=(
+            description=_desc(
                 "Retrieve a single colocation facility by PeeringDB facility ID. "
                 "Returns name, city, country, region_continent, net_count, ix_count, "
                 "and org_id."
@@ -360,7 +395,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search_facilities",
-            description=(
+            description=_desc(
                 "Search for colocation facilities by name, city, or country. "
                 "Returns a list of facility records including name, city, country, "
                 "net_count, and ix_count."
@@ -394,7 +429,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_facility_networks",
-            description=(
+            description=_desc(
                 "List all networks present at a facility (netfac records). "
                 "Each record includes net_id, network name, ASN, and local_asn."
             ),
@@ -419,7 +454,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_facility_exchanges",
-            description=(
+            description=_desc(
                 "List all internet exchanges present at a facility (ixfac records). "
                 "Each record includes ix_id and exchange name."
             ),
@@ -440,7 +475,7 @@ async def list_tools() -> list[types.Tool]:
         # ── Cross-object / intelligence tools ──────────────────────────────────
         types.Tool(
             name="find_common_exchanges",
-            description=(
+            description=_desc(
                 "Find internet exchanges where two networks are both present. "
                 "Useful for identifying potential peering locations. "
                 "Returns a list of common exchanges, each with both networks' "
@@ -458,7 +493,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="find_common_facilities",
-            description=(
+            description=_desc(
                 "Find colocation facilities where two networks both have a presence. "
                 "Useful for identifying where two networks could establish cross-connects."
             ),
@@ -474,7 +509,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_organisation",
-            description=(
+            description=_desc(
                 "Retrieve an organisation record by PeeringDB org ID. "
                 "Returns org name, website, and associated networks/exchanges."
             ),
@@ -490,7 +525,7 @@ async def list_tools() -> list[types.Tool]:
         # ── IX Pricing tools ───────────────────────────────────────────────────
         types.Tool(
             name="search_ix_pricing",
-            description=(
+            description=_desc(
                 "Search and compare internet exchange port pricing from a crowd-sourced "
                 "dataset (source: peering.exposed, maintained by Job Snijders et al.). "
                 "All prices are in EUR/month; cost/Mbps values assume 85% or 40% port "
@@ -554,7 +589,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_my_profile",
-            description=(
+            description=_desc(
                 "Return the authenticated user's PeeringDB profile. "
                 "Returns id, name, verified_user, verified_email, and networks array "
                 "(each with asn, name, perms bitmask — low 4 bits are CRUD). "
@@ -571,7 +606,7 @@ async def list_tools() -> list[types.Tool]:
         # ── IXPDB real-time enrichment tools ───────────────────────────────────
         types.Tool(
             name="get_ix_enrichment",
-            description=(
+            description=_desc(
                 "Fetch real-time supplementary data for an internet exchange from IXPDB "
                 "(api.ixpdb.net), keyed by its PeeringDB IX ID. "
                 "Returns MANRS routing-security certification status (bool), "
@@ -597,7 +632,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_ix_traffic",
-            description=(
+            description=_desc(
                 "Fetch live aggregate traffic statistics for an internet exchange directly "
                 "from its IXP Manager instance, via the traffic API URL registered in IXPDB. "
                 "Data is fetched in real time — not cached. "
@@ -664,7 +699,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         result = await queries.get_network_by_asn(api_key, asn)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"network": result})
+        return _result({"network": result})
 
     elif name == "get_network":
         id_ = int(args["id"])
@@ -672,7 +707,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         result = await queries.get_network(api_key, id_, depth=depth)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"network": result})
+        return _result({"network": result})
 
     elif name == "search_networks":
         limit = min(int(args.get("limit", 20)), 250)
@@ -686,22 +721,22 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
             limit=limit,
             skip=skip,
         )
-        return _dump({"networks": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"networks": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_network_peering_points":
         asn = int(args["asn"])
         limit = int(args.get("limit", 100))
         skip = int(args.get("skip", 0))
         rows = await queries.get_network_peering_points(api_key, asn, limit=limit, skip=skip)
-        return _dump({"peering_points": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"peering_points": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_network_facilities":
         asn = int(args["asn"])
         limit = int(args.get("limit", 50))
         rows = await queries.get_network_facilities(api_key, asn, limit=limit)
-        return _dump({"facilities": rows})
+        return _result({"facilities": rows})
 
     elif name == "get_exchange":
         id_ = int(args["id"])
@@ -709,7 +744,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         result = await queries.get_exchange(api_key, id_, depth=depth)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"exchange": _annotate_ix_scope(result)})
+        return _result({"exchange": _annotate_ix_scope(result)})
 
     elif name == "search_exchanges":
         limit = int(args.get("limit", 20))
@@ -723,16 +758,16 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
             limit=limit,
             skip=skip,
         )
-        return _dump({"exchanges": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"exchanges": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_exchange_members":
         ix_id = int(args["ix_id"])
         limit = int(args.get("limit", 200))
         skip = int(args.get("skip", 0))
         rows = await queries.get_exchange_members(api_key, ix_id, limit=limit, skip=skip)
-        return _dump({"members": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"members": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_facility":
         id_ = int(args["id"])
@@ -740,7 +775,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         result = await queries.get_facility(api_key, id_, depth=depth)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"facility": result})
+        return _result({"facility": result})
 
     elif name == "search_facilities":
         limit = int(args.get("limit", 20))
@@ -753,22 +788,22 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
             limit=limit,
             skip=skip,
         )
-        return _dump({"facilities": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"facilities": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_facility_networks":
         fac_id = int(args["fac_id"])
         limit = int(args.get("limit", 100))
         skip = int(args.get("skip", 0))
         rows = await queries.get_facility_networks(api_key, fac_id, limit=limit, skip=skip)
-        return _dump({"networks": rows, "limit": limit, "skip": skip,
-                      "note": "Use skip to paginate"})
+        return _result({"networks": rows, "limit": limit, "skip": skip,
+                        "note": "Use skip to paginate"})
 
     elif name == "get_facility_exchanges":
         fac_id = int(args["fac_id"])
         limit = int(args.get("limit", 50))
         rows = await queries.get_facility_exchanges(api_key, fac_id, limit=limit)
-        return _dump({"exchanges": rows})
+        return _result({"exchanges": rows})
 
     elif name == "find_common_exchanges":
         asn_a = int(args["asn_a"])
@@ -777,26 +812,26 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         for row in rows:
             _annotate_ix_scope(row)
             row.pop("ixfac_set", None)  # strip raw facility data after annotation
-        return _dump({"common_exchanges": rows})
+        return _result({"common_exchanges": rows})
 
     elif name == "find_common_facilities":
         asn_a = int(args["asn_a"])
         asn_b = int(args["asn_b"])
         rows = await queries.find_common_facilities(api_key, asn_a, asn_b)
-        return _dump({"common_facilities": rows})
+        return _result({"common_facilities": rows})
 
     elif name == "get_organisation":
         id_ = int(args["id"])
         result = await queries.get_organisation(api_key, id_)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"organisation": result})
+        return _result({"organisation": result})
 
     elif name == "get_my_profile":
         result = await queries.get_my_profile(api_key)
         if result is None:
             return _dump({"error": "not found", "tool": name})
-        return _dump({"profile": result})
+        return _result({"profile": result})
 
     elif name == "search_ix_pricing":
         limit = min(int(args.get("limit", 50)), 158)
@@ -810,7 +845,7 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
             sort_by=args.get("sort_by", "cost_per_mbps_100g_85pct"),
             limit=limit,
         )
-        return _dump({
+        return _result({
             "ix_pricing": rows,
             "count": len(rows),
             "source": "peering.exposed — Job Snijders et al. All prices EUR/month.",
@@ -827,14 +862,14 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         if result is None:
             return _dump({"error": "not found", "tool": name,
                           "note": "This IXP is not registered in IXPDB"})
-        return _dump({"ix_enrichment": result})
+        return _result({"ix_enrichment": result})
 
     elif name == "get_ix_traffic":
         ix_id = int(args["ix_id"])
         period = args.get("period", "day")
         category = args.get("category", "bits")
         result = await queries.get_ix_traffic(api_key, ix_id, period=period, category=category)
-        return _dump({"ix_traffic": result})
+        return _result({"ix_traffic": result})
 
     return _dump({"error": f"Unknown tool: {name}", "tool": name})
 
