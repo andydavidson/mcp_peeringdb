@@ -108,16 +108,46 @@ async def get_network_peering_points(
     api_key: str, asn: int, limit: int = 100, skip: int = 0
 ) -> list:
     async with httpx.AsyncClient(base_url=_BASE_URL) as client:
-        try:
-            resp = await client.get(
-                "netixlan",
-                params={"asn": asn, "depth": 0, "limit": limit, "skip": skip},
-                headers=_headers(api_key),
-            )
-        except httpx.RequestError as exc:
-            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
-    _check_status(resp)
-    return resp.json().get("data", [])
+        # Step 1: fetch netixlan records for this ASN
+        async with _RATE_LIMIT:
+            try:
+                resp = await client.get(
+                    "netixlan",
+                    params={"asn": asn, "depth": 0, "limit": limit, "skip": skip},
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp)
+        records = resp.json().get("data", [])
+        if not records:
+            return records
+
+        # Step 2: batch-fetch IX names so each record includes ix_name
+        ix_ids = sorted({r["ix_id"] for r in records if "ix_id" in r})
+        async with _RATE_LIMIT:
+            try:
+                resp_ix = await client.get(
+                    "ix",
+                    params={
+                        "id__in": ",".join(str(i) for i in ix_ids),
+                        "depth": 0,
+                        "fields": "id,name",
+                    },
+                    headers=_headers(api_key),
+                )
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp_ix)
+        ix_by_id = {r["id"]: r.get("name", "") for r in resp_ix.json().get("data", [])}
+
+    for r in records:
+        r["ix_name"] = ix_by_id.get(r.get("ix_id"), "")
+    return records
 
 
 async def get_network_facilities(api_key: str, asn: int, limit: int = 50) -> list:
@@ -356,18 +386,38 @@ async def find_common_exchanges(api_key: str, asn_a: int, asn_b: int) -> list:
         _check_status(resp_ix)
         ix_by_id = {r["id"]: r for r in resp_ix.json().get("data", [])}
 
-    # Step 5: build result; include ixfac_set so server.py can annotate scope
+    # Step 5: build result; include ixfac_set so server.py can annotate scope.
+    # Top-level asn_a/asn_b and name fields make it unambiguous which entries
+    # belong to which network when the result is rendered as a table.
     result = []
     for ix_id in sorted(common_ix_ids):
         ix = ix_by_id.get(ix_id, {})
+        entries_a = by_ix_a[ix_id]
+        entries_b = by_ix_b[ix_id]
         result.append({
             "ix_id": ix_id,
             "ix_name": ix.get("name", ""),
             "ixfac_set": ix.get("ixfac_set", []),
-            "network_a_entries": by_ix_a[ix_id],
-            "network_b_entries": by_ix_b[ix_id],
+            "asn_a": asn_a,
+            "network_a_name": entries_a[0].get("name", "") if entries_a else "",
+            "network_a_entries": entries_a,
+            "asn_b": asn_b,
+            "network_b_name": entries_b[0].get("name", "") if entries_b else "",
+            "network_b_entries": entries_b,
         })
     return result
+
+
+def _netfac_net_name(record: dict) -> str:
+    """Extract network name from a netfac record (depth=1 includes nested net dict)."""
+    net = record.get("net") or {}
+    return net.get("name", "") if isinstance(net, dict) else ""
+
+
+def _netfac_fac_name(record: dict) -> str:
+    """Extract facility name from a netfac record (depth=1 includes nested fac dict)."""
+    fac = record.get("fac") or {}
+    return fac.get("name", "") if isinstance(fac, dict) else ""
 
 
 async def find_common_facilities(api_key: str, asn_a: int, asn_b: int) -> list:
@@ -438,7 +488,9 @@ async def find_common_facilities(api_key: str, asn_a: int, asn_b: int) -> list:
         _check_status(resp_fb)
         netfacs_b = resp_fb.json().get("data", [])
 
-    # Step 5: intersect on fac_id
+    # Step 5: intersect on fac_id.
+    # Top-level asn/name fields make it unambiguous which entry belongs to which
+    # network when the result is rendered as a table.
     by_fac_a = {r["fac_id"]: r for r in netfacs_a}
     by_fac_b = {r["fac_id"]: r for r in netfacs_b}
     common_fac_ids = set(by_fac_a.keys()) & set(by_fac_b.keys())
@@ -446,7 +498,12 @@ async def find_common_facilities(api_key: str, asn_a: int, asn_b: int) -> list:
     return [
         {
             "fac_id": fac_id,
+            "facility_name": _netfac_fac_name(by_fac_a[fac_id]),
+            "asn_a": asn_a,
+            "network_a_name": _netfac_net_name(by_fac_a[fac_id]),
             "network_a_entry": by_fac_a[fac_id],
+            "asn_b": asn_b,
+            "network_b_name": _netfac_net_name(by_fac_b[fac_id]),
             "network_b_entry": by_fac_b[fac_id],
         }
         for fac_id in sorted(common_fac_ids)
