@@ -688,3 +688,184 @@ async def test_get_ix_traffic_api_error():
     )
     with pytest.raises(ValueError, match="Traffic API returned HTTP 503"):
         await queries.get_ix_traffic(_KEY, 26)
+
+
+# ── get_networks_by_asn_batch ──────────────────────────────────────────────────
+
+_NET_A = {
+    "id": 1, "asn": 15169, "name": "Google LLC",
+    "netixlan_set": [{"ix_id": 26, "ipaddr4": "80.249.208.1", "speed": 10000, "is_rs_peer": True}],
+    "netfac_set": [{"fac_id": 1}],
+}
+_NET_B = {
+    "id": 2, "asn": 32934, "name": "Meta",
+    "netixlan_set": [{"ix_id": 26, "ipaddr4": "80.249.209.1", "speed": 10000, "is_rs_peer": False}],
+    "netfac_set": [{"fac_id": 1}],
+}
+_IX_26 = {"id": 26, "name": "AMS-IX", "city": "Amsterdam", "country": "NL"}
+_FAC_1 = {"id": 1, "name": "Equinix AM1", "city": "Amsterdam", "country": "NL"}
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_returns_networks_and_enrichment():
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/net").mock(return_value=_ok([_NET_A, _NET_B]))
+        respx.get(f"{_API}/ix").mock(return_value=_ok([_IX_26]))
+        respx.get(f"{_API}/fac").mock(return_value=_ok([_FAC_1]))
+        networks, ix_info, fac_info = await queries.get_networks_by_asn_batch(_KEY, [15169, 32934])
+    assert len(networks) == 2
+    assert ix_info[26]["name"] == "AMS-IX"
+    assert ix_info[26]["city"] == "Amsterdam"
+    assert fac_info[1]["name"] == "Equinix AM1"
+    assert fac_info[1]["country"] == "NL"
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_empty_asns():
+    networks, ix_info, fac_info = await queries.get_networks_by_asn_batch(_KEY, [])
+    assert networks == []
+    assert ix_info == {}
+    assert fac_info == {}
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_no_results():
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/net").mock(return_value=_ok([]))
+        networks, ix_info, fac_info = await queries.get_networks_by_asn_batch(_KEY, [99999])
+    assert networks == []
+    assert ix_info == {}
+    assert fac_info == {}
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_skips_ix_fac_calls_when_no_ids():
+    """No IX or facility enrichment requests when netixlan_set / netfac_set are empty."""
+    with patch("asyncio.sleep"):
+        net = {"id": 3, "asn": 1, "name": "Tiny", "netixlan_set": [], "netfac_set": []}
+        net_route = respx.get(f"{_API}/net").mock(return_value=_ok([net]))
+        ix_route = respx.get(f"{_API}/ix").mock(return_value=_ok([]))
+        fac_route = respx.get(f"{_API}/fac").mock(return_value=_ok([]))
+        await queries.get_networks_by_asn_batch(_KEY, [1])
+    assert net_route.called
+    assert not ix_route.called
+    assert not fac_route.called
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_network_fields_added_to_request():
+    with patch("asyncio.sleep"):
+        route = respx.get(f"{_API}/net").mock(return_value=_ok([]))
+        await queries.get_networks_by_asn_batch(_KEY, [15169], network_fields=["name", "policy_general"])
+    url = str(route.calls[0].request.url)
+    assert "fields=" in url
+    assert "name" in url
+    assert "netixlan_set" in url
+    assert "netfac_set" in url
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_uses_asn_in_filter():
+    with patch("asyncio.sleep"):
+        route = respx.get(f"{_API}/net").mock(return_value=_ok([]))
+        await queries.get_networks_by_asn_batch(_KEY, [15169, 32934])
+    url = str(route.calls[0].request.url)
+    assert "asn__in=" in url
+    assert "15169" in url
+    assert "32934" in url
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_401_raises():
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/net").mock(return_value=httpx.Response(401))
+        with pytest.raises(ValueError, match="authentication failed"):
+            await queries.get_networks_by_asn_batch(_KEY, [15169])
+
+
+@respx.mock
+async def test_get_networks_by_asn_batch_network_error_raises():
+    with patch("asyncio.sleep"):
+        respx.get(f"{_API}/net").mock(side_effect=httpx.ConnectError("refused"))
+        with pytest.raises(ValueError, match="Could not reach PeeringDB"):
+            await queries.get_networks_by_asn_batch(_KEY, [15169])
+
+
+# ── get_exchanges_batch ────────────────────────────────────────────────────────
+
+@respx.mock
+async def test_get_exchanges_batch_returns_list():
+    ixs = [{"id": 26, "name": "AMS-IX"}, {"id": 31, "name": "DE-CIX Frankfurt"}]
+    respx.get(f"{_API}/ix").mock(return_value=_ok(ixs))
+    result = await queries.get_exchanges_batch(_KEY, [26, 31])
+    assert result == ixs
+
+
+@respx.mock
+async def test_get_exchanges_batch_uses_id_in_filter():
+    route = respx.get(f"{_API}/ix").mock(return_value=_ok([]))
+    await queries.get_exchanges_batch(_KEY, [26, 31])
+    url = str(route.calls[0].request.url)
+    assert "id__in=" in url
+    assert "26" in url
+    assert "31" in url
+
+
+@respx.mock
+async def test_get_exchanges_batch_empty_ids():
+    result = await queries.get_exchanges_batch(_KEY, [])
+    assert result == []
+
+
+@respx.mock
+async def test_get_exchanges_batch_401_raises():
+    respx.get(f"{_API}/ix").mock(return_value=httpx.Response(401))
+    with pytest.raises(ValueError, match="authentication failed"):
+        await queries.get_exchanges_batch(_KEY, [26])
+
+
+@respx.mock
+async def test_get_exchanges_batch_network_error_raises():
+    respx.get(f"{_API}/ix").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(ValueError, match="Could not reach PeeringDB"):
+        await queries.get_exchanges_batch(_KEY, [26])
+
+
+# ── get_facilities_batch ───────────────────────────────────────────────────────
+
+@respx.mock
+async def test_get_facilities_batch_returns_list():
+    facs = [{"id": 1, "name": "Equinix AM1"}, {"id": 2, "name": "Interxion AMS7"}]
+    respx.get(f"{_API}/fac").mock(return_value=_ok(facs))
+    result = await queries.get_facilities_batch(_KEY, [1, 2])
+    assert result == facs
+
+
+@respx.mock
+async def test_get_facilities_batch_uses_id_in_filter():
+    route = respx.get(f"{_API}/fac").mock(return_value=_ok([]))
+    await queries.get_facilities_batch(_KEY, [1, 2])
+    url = str(route.calls[0].request.url)
+    assert "id__in=" in url
+    assert "1" in url
+    assert "2" in url
+
+
+@respx.mock
+async def test_get_facilities_batch_empty_ids():
+    result = await queries.get_facilities_batch(_KEY, [])
+    assert result == []
+
+
+@respx.mock
+async def test_get_facilities_batch_401_raises():
+    respx.get(f"{_API}/fac").mock(return_value=httpx.Response(401))
+    with pytest.raises(ValueError, match="authentication failed"):
+        await queries.get_facilities_batch(_KEY, [1])
+
+
+@respx.mock
+async def test_get_facilities_batch_network_error_raises():
+    respx.get(f"{_API}/fac").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(ValueError, match="Could not reach PeeringDB"):
+        await queries.get_facilities_batch(_KEY, [1])
