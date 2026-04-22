@@ -333,26 +333,38 @@ async def get_networks_by_asn_batch(
     Returns (networks, ix_info_by_id, fac_info_by_id) so the caller can
     enrich and project netixlan_set / netfac_set entries without additional
     round-trips.  ix_info and fac_info map id → {name, city, country}.
+
+    Uses individual asn= requests (not asn__in) because PeeringDB does not
+    expose asn__in as a valid list-endpoint filter.
     """
     if not asns:
         return [], {}, {}
 
-    params: dict = {"asn__in": ",".join(str(a) for a in asns), "depth": 2}
-    if network_fields:
-        # Always pull nested sets regardless of which scalar fields were requested.
-        all_fields = set(network_fields) | {"id", "asn", "netixlan_set", "netfac_set"}
-        params["fields"] = ",".join(sorted(all_fields))
+    networks = []
+    # Extend timeout: depth=2 responses can be large, 5 s default is too tight.
+    async with httpx.AsyncClient(base_url=_BASE_URL, timeout=30.0) as client:
+        for asn in asns:
+            params: dict = {"asn": asn, "depth": 2}
+            if network_fields:
+                all_fields = set(network_fields) | {"id", "asn", "netixlan_set", "netfac_set"}
+                params["fields"] = ",".join(sorted(all_fields))
 
-    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
-        async with _RATE_LIMIT:
-            try:
-                resp = await client.get("net", params=params, headers=_headers(api_key))
-            except httpx.RequestError as exc:
-                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
-            await asyncio.sleep(1)
+            async with _RATE_LIMIT:
+                try:
+                    resp = await client.get("net", params=params, headers=_headers(api_key))
+                except httpx.RequestError as exc:
+                    raise ValueError(
+                        f"Could not reach PeeringDB ({type(exc).__name__}): {exc}"
+                    ) from exc
+                await asyncio.sleep(1)
 
-        _check_status(resp)
-        networks = resp.json().get("data", [])
+            if resp.status_code == 404:
+                continue
+            _check_status(resp)
+            data = resp.json().get("data", [])
+            if data:
+                networks.append(data[0])
+
         if not networks:
             return [], {}, {}
 
@@ -384,7 +396,9 @@ async def get_networks_by_asn_batch(
                         headers=_headers(api_key),
                     )
                 except httpx.RequestError as exc:
-                    raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+                    raise ValueError(
+                        f"Could not reach PeeringDB ({type(exc).__name__}): {exc}"
+                    ) from exc
                 await asyncio.sleep(1)
             _check_status(resp_ix)
             for r in resp_ix.json().get("data", []):
@@ -408,7 +422,9 @@ async def get_networks_by_asn_batch(
                         headers=_headers(api_key),
                     )
                 except httpx.RequestError as exc:
-                    raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+                    raise ValueError(
+                        f"Could not reach PeeringDB ({type(exc).__name__}): {exc}"
+                    ) from exc
                 await asyncio.sleep(1)
             _check_status(resp_fac)
             for r in resp_fac.json().get("data", []):
