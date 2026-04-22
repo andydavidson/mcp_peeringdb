@@ -321,6 +321,140 @@ async def get_facility_exchanges(
     return resp.json().get("data", [])
 
 
+# ── Batch lookup tools ────────────────────────────────────────────────────────
+
+async def get_networks_by_asn_batch(
+    api_key: str,
+    asns: list[int],
+    network_fields: list[str] | None = None,
+) -> tuple[list, dict[int, dict], dict[int, dict]]:
+    """Fetch multiple networks by ASN in as few requests as possible.
+
+    Returns (networks, ix_info_by_id, fac_info_by_id) so the caller can
+    enrich and project netixlan_set / netfac_set entries without additional
+    round-trips.  ix_info and fac_info map id → {name, city, country}.
+    """
+    if not asns:
+        return [], {}, {}
+
+    params: dict = {"asn__in": ",".join(str(a) for a in asns), "depth": 2}
+    if network_fields:
+        # Always pull nested sets regardless of which scalar fields were requested.
+        all_fields = set(network_fields) | {"id", "asn", "netixlan_set", "netfac_set"}
+        params["fields"] = ",".join(sorted(all_fields))
+
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        async with _RATE_LIMIT:
+            try:
+                resp = await client.get("net", params=params, headers=_headers(api_key))
+            except httpx.RequestError as exc:
+                raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+            await asyncio.sleep(1)
+
+        _check_status(resp)
+        networks = resp.json().get("data", [])
+        if not networks:
+            return [], {}, {}
+
+        # Collect unique IX and facility IDs for a single enrichment pass each.
+        ix_ids = sorted({
+            r["ix_id"]
+            for net in networks
+            for r in net.get("netixlan_set", [])
+            if r.get("ix_id") is not None
+        })
+        fac_ids = sorted({
+            r["fac_id"]
+            for net in networks
+            for r in net.get("netfac_set", [])
+            if r.get("fac_id") is not None
+        })
+
+        ix_info: dict[int, dict] = {}
+        if ix_ids:
+            async with _RATE_LIMIT:
+                try:
+                    resp_ix = await client.get(
+                        "ix",
+                        params={
+                            "id__in": ",".join(str(i) for i in ix_ids),
+                            "depth": 0,
+                            "fields": "id,name,city,country",
+                        },
+                        headers=_headers(api_key),
+                    )
+                except httpx.RequestError as exc:
+                    raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+                await asyncio.sleep(1)
+            _check_status(resp_ix)
+            for r in resp_ix.json().get("data", []):
+                ix_info[r["id"]] = {
+                    "name": r.get("name", ""),
+                    "city": r.get("city", ""),
+                    "country": r.get("country", ""),
+                }
+
+        fac_info: dict[int, dict] = {}
+        if fac_ids:
+            async with _RATE_LIMIT:
+                try:
+                    resp_fac = await client.get(
+                        "fac",
+                        params={
+                            "id__in": ",".join(str(i) for i in fac_ids),
+                            "depth": 0,
+                            "fields": "id,name,city,country",
+                        },
+                        headers=_headers(api_key),
+                    )
+                except httpx.RequestError as exc:
+                    raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+                await asyncio.sleep(1)
+            _check_status(resp_fac)
+            for r in resp_fac.json().get("data", []):
+                fac_info[r["id"]] = {
+                    "name": r.get("name", ""),
+                    "city": r.get("city", ""),
+                    "country": r.get("country", ""),
+                }
+
+    return networks, ix_info, fac_info
+
+
+async def get_exchanges_batch(api_key: str, ids: list[int]) -> list:
+    """Fetch multiple internet exchanges by PeeringDB IX ID in one request."""
+    if not ids:
+        return []
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "ix",
+                params={"id__in": ",".join(str(i) for i in ids), "depth": 2},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
+async def get_facilities_batch(api_key: str, ids: list[int]) -> list:
+    """Fetch multiple colocation facilities by PeeringDB facility ID in one request."""
+    if not ids:
+        return []
+    async with httpx.AsyncClient(base_url=_BASE_URL) as client:
+        try:
+            resp = await client.get(
+                "fac",
+                params={"id__in": ",".join(str(i) for i in ids), "depth": 2},
+                headers=_headers(api_key),
+            )
+        except httpx.RequestError as exc:
+            raise ValueError(f"Could not reach PeeringDB: {exc}") from exc
+    _check_status(resp)
+    return resp.json().get("data", [])
+
+
 # ── Cross-object / intelligence tools ─────────────────────────────────────────
 
 async def find_common_exchanges(api_key: str, asn_a: int, asn_b: int) -> list:

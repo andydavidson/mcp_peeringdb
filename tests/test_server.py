@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from peeringdb_mcp.server import _annotate_ix_scope, _clean, _dispatch, _dump, _ix_countries, call_tool
+from peeringdb_mcp.server import (
+    _annotate_ix_scope, _clean, _dispatch, _dump, _ix_countries,
+    _project_netixlan, _project_netfac, call_tool,
+)
 from mcp import types
 
 
@@ -482,3 +485,412 @@ def test_create_app_returns_starlette():
     from peeringdb_mcp.server import create_app
     app = create_app()
     assert isinstance(app, Starlette)
+
+
+# ── _project_netixlan ──────────────────────────────────────────────────────────
+
+_IX_INFO = {26: {"name": "AMS-IX", "city": "Amsterdam", "country": "NL"}}
+_NETIXLAN = {
+    "ix_id": 26, "ipaddr4": "80.249.208.1", "ipaddr6": "2001:7f8:1::a500:1:1",
+    "speed": 10000, "is_rs_peer": True, "ixlan_id": 42,
+}
+
+
+def test_project_netixlan_presence_includes_name_and_city():
+    result = _project_netixlan(_NETIXLAN, "presence", _IX_INFO)
+    assert result["ix_id"] == 26
+    assert result["ix_name"] == "AMS-IX"
+    assert result["ix_city"] == "Amsterdam"
+    assert result["ix_country"] == "NL"
+    assert result["is_rs_peer"] is True
+    assert "ipaddr4" not in result
+    assert "speed" not in result
+
+
+def test_project_netixlan_routing_includes_ips_and_speed():
+    result = _project_netixlan(_NETIXLAN, "routing", _IX_INFO)
+    assert result["ix_id"] == 26
+    assert result["ix_name"] == "AMS-IX"
+    assert result["ipaddr4"] == "80.249.208.1"
+    assert result["ipaddr6"] == "2001:7f8:1::a500:1:1"
+    assert result["speed"] == 10000
+    assert result["is_rs_peer"] is True
+    assert result["ixlan_id"] == 42
+
+
+def test_project_netixlan_ids_only():
+    result = _project_netixlan(_NETIXLAN, "ids_only", _IX_INFO)
+    assert result == {"ix_id": 26}
+
+
+def test_project_netixlan_unknown_ix_id_uses_empty_strings():
+    entry = {**_NETIXLAN, "ix_id": 9999}
+    result = _project_netixlan(entry, "presence", _IX_INFO)
+    assert result["ix_id"] == 9999
+    assert result["ix_name"] == ""
+    assert result["ix_city"] == ""
+
+
+def test_project_netixlan_none_ix_id():
+    entry = {**_NETIXLAN, "ix_id": None}
+    result = _project_netixlan(entry, "presence", _IX_INFO)
+    assert result["ix_id"] is None
+    assert result["ix_name"] == ""
+
+
+# ── _project_netfac ────────────────────────────────────────────────────────────
+
+_FAC_INFO = {1: {"name": "Equinix AM1", "city": "Amsterdam", "country": "NL"}}
+_NETFAC = {"fac_id": 1}
+
+
+def test_project_netfac_presence_includes_name_and_location():
+    result = _project_netfac(_NETFAC, "presence", _FAC_INFO)
+    assert result["fac_id"] == 1
+    assert result["fac_name"] == "Equinix AM1"
+    assert result["city"] == "Amsterdam"
+    assert result["country"] == "NL"
+
+
+def test_project_netfac_routing_same_as_presence():
+    # No routing concept at the facility layer — routing and presence are identical.
+    presence = _project_netfac(_NETFAC, "presence", _FAC_INFO)
+    routing = _project_netfac(_NETFAC, "routing", _FAC_INFO)
+    assert presence == routing
+
+
+def test_project_netfac_ids_only():
+    result = _project_netfac(_NETFAC, "ids_only", _FAC_INFO)
+    assert result == {"fac_id": 1}
+
+
+def test_project_netfac_unknown_fac_id_uses_empty_strings():
+    entry = {"fac_id": 9999}
+    result = _project_netfac(entry, "presence", _FAC_INFO)
+    assert result["fac_id"] == 9999
+    assert result["fac_name"] == ""
+    assert result["city"] == ""
+    assert result["country"] == ""
+
+
+# ── _dispatch: get_networks_by_asn_batch ──────────────────────────────────────
+
+_BATCH_NETWORKS = [
+    {
+        "id": 1, "asn": 15169, "name": "Google LLC",
+        "netixlan_set": [{"ix_id": 26, "ipaddr4": "1.2.3.4", "speed": 10000, "is_rs_peer": True, "ixlan_id": 5}],
+        "netfac_set": [{"fac_id": 1}],
+    }
+]
+_BATCH_IX_INFO = {26: {"name": "AMS-IX", "city": "Amsterdam", "country": "NL"}}
+_BATCH_FAC_INFO = {1: {"name": "Equinix AM1", "city": "Amsterdam", "country": "NL"}}
+
+
+async def test_dispatch_batch_networks_presence_projects_correctly():
+    mock = AsyncMock(return_value=(_BATCH_NETWORKS, _BATCH_IX_INFO, _BATCH_FAC_INFO))
+    with patch("peeringdb_mcp.server.queries.get_networks_by_asn_batch", new=mock):
+        result = await _dispatch("get_networks_by_asn_batch", {"asns": [15169]}, "key")
+    assert "AMS-IX" in result
+    assert "Amsterdam" in result
+    assert "Equinix AM1" in result
+    assert "ipaddr4" not in result   # presence default strips IPs
+    assert "found_count" in result
+    assert "requested_count" in result
+
+
+async def test_dispatch_batch_networks_routing_includes_ips():
+    mock = AsyncMock(return_value=(_BATCH_NETWORKS, _BATCH_IX_INFO, _BATCH_FAC_INFO))
+    with patch("peeringdb_mcp.server.queries.get_networks_by_asn_batch", new=mock):
+        result = await _dispatch(
+            "get_networks_by_asn_batch", {"asns": [15169], "detail": "routing"}, "key"
+        )
+    assert "ipaddr4" in result
+    assert "speed" in result
+
+
+async def test_dispatch_batch_networks_ids_only():
+    mock = AsyncMock(return_value=(_BATCH_NETWORKS, _BATCH_IX_INFO, _BATCH_FAC_INFO))
+    with patch("peeringdb_mcp.server.queries.get_networks_by_asn_batch", new=mock):
+        result = await _dispatch(
+            "get_networks_by_asn_batch", {"asns": [15169], "detail": "ids_only"}, "key"
+        )
+    assert "ix_id" in result
+    assert "fac_id" in result
+    assert "AMS-IX" not in result   # no name enrichment at ids_only
+
+
+async def test_dispatch_batch_networks_network_fields_forwarded():
+    mock = AsyncMock(return_value=([], {}, {}))
+    with patch("peeringdb_mcp.server.queries.get_networks_by_asn_batch", new=mock):
+        await _dispatch(
+            "get_networks_by_asn_batch",
+            {"asns": [15169], "network_fields": ["name", "policy_general"]},
+            "key",
+        )
+    mock.assert_called_once_with("key", [15169], network_fields=["name", "policy_general"])
+
+
+async def test_dispatch_batch_networks_empty_asns_returns_error():
+    result = await _dispatch("get_networks_by_asn_batch", {"asns": []}, "key")
+    assert "error" in result
+
+
+async def test_dispatch_batch_networks_over_limit_returns_error():
+    result = await _dispatch(
+        "get_networks_by_asn_batch", {"asns": list(range(21))}, "key"
+    )
+    assert "error" in result
+    assert "20" in result
+
+
+async def test_dispatch_batch_networks_counts_in_result():
+    two_networks = [
+        {**_BATCH_NETWORKS[0], "asn": 15169},
+        {**_BATCH_NETWORKS[0], "asn": 32934, "id": 2},
+    ]
+    mock = AsyncMock(return_value=(two_networks, _BATCH_IX_INFO, _BATCH_FAC_INFO))
+    with patch("peeringdb_mcp.server.queries.get_networks_by_asn_batch", new=mock):
+        result = await _dispatch(
+            "get_networks_by_asn_batch", {"asns": [15169, 32934, 99999]}, "key"
+        )
+    assert "requested_count = 3" in result
+    assert "found_count = 2" in result
+
+
+# ── _dispatch: get_exchanges_batch ────────────────────────────────────────────
+
+_BATCH_IX = [
+    {
+        "id": 26, "name": "AMS-IX",
+        "ixfac_set": [{"fac_id": 1, "name": "Equinix AM1", "city": "Amsterdam", "country": "NL"}],
+        "ixlan_set": [{"id": 5, "name": "AMS-IX LAN", "netixlan_set": [{"asn": 15169}]}],
+    }
+]
+
+
+async def test_dispatch_batch_exchanges_returns_exchanges():
+    mock = AsyncMock(return_value=_BATCH_IX)
+    with patch("peeringdb_mcp.server.queries.get_exchanges_batch", new=mock):
+        result = await _dispatch("get_exchanges_batch", {"ids": [26]}, "key")
+    assert "AMS-IX" in result
+    assert "exchanges" in result
+    assert "found_count" in result
+
+
+async def test_dispatch_batch_exchanges_applies_scope_annotation():
+    ix = [{"id": 26, "name": "AMS-IX", "ixfac_set": [{"fac": {"country": "NL"}}], "ixlan_set": []}]
+    with patch("peeringdb_mcp.server.queries.get_exchanges_batch", new=AsyncMock(return_value=ix)):
+        result = await _dispatch("get_exchanges_batch", {"ids": [26]}, "key")
+    assert "ix_scope" in result
+
+
+async def test_dispatch_batch_exchanges_strips_member_list_from_ixlan():
+    mock = AsyncMock(return_value=_BATCH_IX)
+    with patch("peeringdb_mcp.server.queries.get_exchanges_batch", new=mock):
+        result = await _dispatch("get_exchanges_batch", {"ids": [26]}, "key")
+    # netixlan_set inside ixlan_set entries must be stripped
+    assert "15169" not in result
+
+
+async def test_dispatch_batch_exchanges_projects_ixfac_set():
+    mock = AsyncMock(return_value=_BATCH_IX)
+    with patch("peeringdb_mcp.server.queries.get_exchanges_batch", new=mock):
+        result = await _dispatch("get_exchanges_batch", {"ids": [26]}, "key")
+    assert "Equinix AM1" in result
+    assert "fac_id" in result
+
+
+async def test_dispatch_batch_exchanges_empty_ids_returns_error():
+    result = await _dispatch("get_exchanges_batch", {"ids": []}, "key")
+    assert "error" in result
+
+
+async def test_dispatch_batch_exchanges_over_limit_returns_error():
+    result = await _dispatch("get_exchanges_batch", {"ids": list(range(21))}, "key")
+    assert "error" in result
+    assert "20" in result
+
+
+# ── _dispatch: get_facilities_batch ───────────────────────────────────────────
+
+_BATCH_FAC = [
+    {
+        "id": 1, "name": "Equinix AM1", "city": "Amsterdam", "country": "NL",
+        "net_count": 500, "ix_count": 3,
+        "netfac_set": [{"net_id": 99, "name": "BigNetwork"}],
+        "ixfac_set": [{"ix_id": 26, "name": "AMS-IX"}],
+    }
+]
+
+
+async def test_dispatch_batch_facilities_returns_facilities():
+    mock = AsyncMock(return_value=_BATCH_FAC)
+    with patch("peeringdb_mcp.server.queries.get_facilities_batch", new=mock):
+        result = await _dispatch("get_facilities_batch", {"ids": [1]}, "key")
+    assert "Equinix AM1" in result
+    assert "facilities" in result
+    assert "found_count" in result
+
+
+async def test_dispatch_batch_facilities_strips_netfac_set():
+    mock = AsyncMock(return_value=_BATCH_FAC)
+    with patch("peeringdb_mcp.server.queries.get_facilities_batch", new=mock):
+        result = await _dispatch("get_facilities_batch", {"ids": [1]}, "key")
+    # Full network list must be stripped — too large to return in batch
+    assert "BigNetwork" not in result
+    assert "netfac_set" not in result
+
+
+async def test_dispatch_batch_facilities_projects_ixfac_set():
+    mock = AsyncMock(return_value=_BATCH_FAC)
+    with patch("peeringdb_mcp.server.queries.get_facilities_batch", new=mock):
+        result = await _dispatch("get_facilities_batch", {"ids": [1]}, "key")
+    # IX presence must still appear
+    assert "AMS-IX" in result
+    assert "ix_id" in result
+
+
+async def test_dispatch_batch_facilities_empty_ids_returns_error():
+    result = await _dispatch("get_facilities_batch", {"ids": []}, "key")
+    assert "error" in result
+
+
+async def test_dispatch_batch_facilities_over_limit_returns_error():
+    result = await _dispatch("get_facilities_batch", {"ids": list(range(21))}, "key")
+    assert "error" in result
+    assert "20" in result
+
+
+# ── _dispatch: get_exchange_members detail ────────────────────────────────────
+
+_MEMBERS = [
+    {"asn": 15169, "name": "Google LLC", "net_id": 1, "ipaddr4": "80.249.208.1",
+     "ipaddr6": "2001:7f8:1::1", "speed": 10000, "is_rs_peer": True},
+    {"asn": 32934, "name": "Meta", "net_id": 2, "ipaddr4": "80.249.209.1",
+     "ipaddr6": None, "speed": 1000, "is_rs_peer": False},
+]
+
+
+async def test_dispatch_exchange_members_routing_default_returns_full_records():
+    with patch("peeringdb_mcp.server.queries.get_exchange_members", new=AsyncMock(return_value=_MEMBERS)):
+        result = await _dispatch("get_exchange_members", {"ix_id": "26"}, "key")
+    assert "ipaddr4" in result
+    assert "speed" in result
+    assert "is_rs_peer" in result
+
+
+async def test_dispatch_exchange_members_presence_returns_asn_and_name_only():
+    with patch("peeringdb_mcp.server.queries.get_exchange_members", new=AsyncMock(return_value=_MEMBERS)):
+        result = await _dispatch(
+            "get_exchange_members", {"ix_id": "26", "detail": "presence"}, "key"
+        )
+    assert "Google LLC" in result
+    assert "15169" in result
+    assert "ipaddr4" not in result
+    assert "speed" not in result
+    assert "is_rs_peer" not in result
+
+
+async def test_dispatch_exchange_members_presence_still_includes_net_id():
+    with patch("peeringdb_mcp.server.queries.get_exchange_members", new=AsyncMock(return_value=_MEMBERS)):
+        result = await _dispatch(
+            "get_exchange_members", {"ix_id": "26", "detail": "presence"}, "key"
+        )
+    assert "net_id" in result
+
+
+# ── _dispatch: get_facility_networks detail ───────────────────────────────────
+
+_NETFAC_RECORDS = [
+    {"net_id": 1, "local_asn": 15169, "net": {"name": "Google LLC", "asn": 15169},
+     "avail_sonet": False, "avail_ethernet": True},
+    {"net_id": 2, "local_asn": 32934, "net": {"name": "Meta", "asn": 32934},
+     "avail_sonet": False, "avail_ethernet": True},
+]
+
+
+async def test_dispatch_facility_networks_full_default_returns_complete_records():
+    with patch("peeringdb_mcp.server.queries.get_facility_networks", new=AsyncMock(return_value=_NETFAC_RECORDS)):
+        result = await _dispatch("get_facility_networks", {"fac_id": "1"}, "key")
+    assert "avail_ethernet" in result
+    assert "local_asn" in result
+
+
+async def test_dispatch_facility_networks_presence_returns_net_id_name_asn():
+    with patch("peeringdb_mcp.server.queries.get_facility_networks", new=AsyncMock(return_value=_NETFAC_RECORDS)):
+        result = await _dispatch(
+            "get_facility_networks", {"fac_id": "1", "detail": "presence"}, "key"
+        )
+    assert "Google LLC" in result
+    assert "15169" in result
+    assert "avail_ethernet" not in result
+    assert "local_asn" not in result
+
+
+async def test_dispatch_facility_networks_presence_handles_missing_net_dict():
+    records = [{"net_id": 5, "local_asn": 99, "net": None}]
+    with patch("peeringdb_mcp.server.queries.get_facility_networks", new=AsyncMock(return_value=records)):
+        result = await _dispatch(
+            "get_facility_networks", {"fac_id": "1", "detail": "presence"}, "key"
+        )
+    assert "net_id" in result
+
+
+# ── _dispatch: find_common_exchanges detail ───────────────────────────────────
+
+_COMMON_EX = [
+    {
+        "ix_id": 26, "ix_name": "AMS-IX",
+        "ixfac_set": [{"fac": {"country": "NL"}}],
+        "asn_a": 15169, "network_a_name": "Google LLC",
+        "network_a_entries": [{"ipaddr4": "1.2.3.4", "speed": 10000}],
+        "asn_b": 32934, "network_b_name": "Meta",
+        "network_b_entries": [{"ipaddr4": "5.6.7.8", "speed": 10000}],
+    }
+]
+
+
+async def test_dispatch_find_common_exchanges_routing_default_includes_entries():
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=_COMMON_EX)):
+        result = await _dispatch(
+            "find_common_exchanges", {"asn_a": "15169", "asn_b": "32934"}, "key"
+        )
+    assert "network_a_entries" in result
+    assert "network_b_entries" in result
+    assert "1.2.3.4" in result
+
+
+async def test_dispatch_find_common_exchanges_presence_strips_entries():
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=_COMMON_EX)):
+        result = await _dispatch(
+            "find_common_exchanges",
+            {"asn_a": "15169", "asn_b": "32934", "detail": "presence"},
+            "key",
+        )
+    assert "network_a_entries" not in result
+    assert "network_b_entries" not in result
+    assert "1.2.3.4" not in result
+
+
+async def test_dispatch_find_common_exchanges_presence_keeps_ix_level_info():
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=_COMMON_EX)):
+        result = await _dispatch(
+            "find_common_exchanges",
+            {"asn_a": "15169", "asn_b": "32934", "detail": "presence"},
+            "key",
+        )
+    assert "AMS-IX" in result
+    assert "ix_scope" in result
+    assert "Google LLC" in result   # network_a_name kept even in presence mode
+    assert "Meta" in result
+
+
+async def test_dispatch_find_common_exchanges_ixfac_set_always_stripped():
+    with patch("peeringdb_mcp.server.queries.find_common_exchanges", new=AsyncMock(return_value=_COMMON_EX)):
+        for detail in ("routing", "presence"):
+            result = await _dispatch(
+                "find_common_exchanges",
+                {"asn_a": "15169", "asn_b": "32934", "detail": detail},
+                "key",
+            )
+            assert "ixfac_set" not in result
