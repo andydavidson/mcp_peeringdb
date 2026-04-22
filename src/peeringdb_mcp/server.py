@@ -134,6 +134,57 @@ def _annotate_ix_scope(ix_data: dict) -> dict:
     return ix_data
 
 
+# ── Batch projection helpers ───────────────────────────────────────────────────
+
+def _project_netixlan(entry: dict, detail: str, ix_info: dict[int, dict]) -> dict:
+    """Project a netixlan record to the fields appropriate for detail level.
+
+    detail values:
+      "presence" — ix identity + route-server flag only (default for batch)
+      "routing"  — adds peering IPs, port speed, ixlan_id
+      "ids_only" — just ix_id
+    """
+    ix_id = entry.get("ix_id")
+    info = ix_info.get(ix_id, {}) if ix_id is not None else {}
+
+    if detail == "ids_only":
+        return {"ix_id": ix_id}
+
+    base: dict = {
+        "ix_id": ix_id,
+        "ix_name": info.get("name", ""),
+        "ix_city": info.get("city", ""),
+        "ix_country": info.get("country", ""),
+        "is_rs_peer": entry.get("is_rs_peer"),
+    }
+    if detail == "routing":
+        base["ipaddr4"] = entry.get("ipaddr4")
+        base["ipaddr6"] = entry.get("ipaddr6")
+        base["speed"] = entry.get("speed")
+        base["ixlan_id"] = entry.get("ixlan_id")
+    return base
+
+
+def _project_netfac(entry: dict, detail: str, fac_info: dict[int, dict]) -> dict:
+    """Project a netfac record to the fields appropriate for detail level.
+
+    detail values:
+      "presence" / "routing" — facility identity (city/country); no routing
+                               concept exists at the facility layer
+      "ids_only"             — just fac_id
+    """
+    fac_id = entry.get("fac_id")
+    if detail == "ids_only":
+        return {"fac_id": fac_id}
+    info = fac_info.get(fac_id, {}) if fac_id is not None else {}
+    return {
+        "fac_id": fac_id,
+        "fac_name": info.get("name", ""),
+        "city": info.get("city", ""),
+        "country": info.get("country", ""),
+    }
+
+
 # ── Tool definitions ───────────────────────────────────────────────────────────
 
 _API_KEY_PARAM = {
@@ -349,14 +400,25 @@ async def list_tools() -> list[types.Tool]:
             name="get_exchange_members",
             description=_desc(
                 "Return all networks (netixlan records) present at an internet exchange. "
-                "Each record includes asn, net_id, ipaddr4, ipaddr6, speed (Mbps), "
-                "and is_rs_peer. Useful for listing who peers at a given IX."
+                "Use detail='presence' for a compact member list (ASN + name only) — "
+                "recommended for large IXPs like AMS-IX or DE-CIX which have 900+ members. "
+                "Use detail='routing' (default) for full records including peering IPs, "
+                "port speed (Mbps), and is_rs_peer flag."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     **_API_KEY_PARAM,
                     "ix_id": {"type": "integer", "description": "PeeringDB IX ID"},
+                    "detail": {
+                        "type": "string",
+                        "enum": ["presence", "routing"],
+                        "description": (
+                            "routing (default): full record with IPs, speed, is_rs_peer. "
+                            "presence: ASN and network name only — much lower token cost."
+                        ),
+                        "default": "routing",
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Max results (default 200)",
@@ -431,13 +493,25 @@ async def list_tools() -> list[types.Tool]:
             name="get_facility_networks",
             description=_desc(
                 "List all networks present at a facility (netfac records). "
-                "Each record includes net_id, network name, ASN, and local_asn."
+                "Use detail='presence' for a compact list (net_id, name, ASN only) — "
+                "recommended for large facilities like Equinix NY which can have 500+ networks. "
+                "Use detail='full' (default) for complete depth=1 records including local_asn "
+                "and availability flags."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     **_API_KEY_PARAM,
                     "fac_id": {"type": "integer", "description": "PeeringDB facility ID"},
+                    "detail": {
+                        "type": "string",
+                        "enum": ["presence", "full"],
+                        "description": (
+                            "full (default): complete netfac record. "
+                            "presence: net_id, network name, and ASN only — much lower token cost."
+                        ),
+                        "default": "full",
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Max results (default 100)",
@@ -472,13 +546,109 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["peeringdb_api_key", "fac_id"],
             },
         ),
+        # ── Batch lookup tools ─────────────────────────────────────────────────
+        types.Tool(
+            name="get_networks_by_asn_batch",
+            description=_desc(
+                "Look up multiple networks by AS number in a single call. "
+                "Returns one record per ASN with key scalar fields plus projected "
+                "netixlan_set (IX peering points) and netfac_set (facility presences). "
+                "Use detail='presence' (default) for IX name/city/country and RS flag — "
+                "low token cost, good for comparing many networks. "
+                "Use detail='routing' to also include peering IPs and port speed. "
+                "Use detail='ids_only' to get just ix_id / fac_id for follow-up calls. "
+                "Use network_fields to restrict which top-level scalar fields are returned "
+                "(e.g. ['name','asn','policy_general','website']) — "
+                "netixlan_set and netfac_set are always included regardless. "
+                "Maximum 20 ASNs per call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "asns": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of AS numbers (max 20)",
+                    },
+                    "detail": {
+                        "type": "string",
+                        "enum": ["presence", "routing", "ids_only"],
+                        "description": (
+                            "presence (default): IX/facility name, city, country, RS flag. "
+                            "routing: adds peering IPs and port speed. "
+                            "ids_only: just ix_id / fac_id."
+                        ),
+                        "default": "presence",
+                    },
+                    "network_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Top-level scalar fields to return for each network record "
+                            "(e.g. ['name','asn','policy_general','info_prefixes4','website']). "
+                            "Omit to receive all scalar fields. "
+                            "netixlan_set and netfac_set are always included."
+                        ),
+                    },
+                },
+                "required": ["peeringdb_api_key", "asns"],
+            },
+        ),
+        types.Tool(
+            name="get_exchanges_batch",
+            description=_desc(
+                "Look up multiple internet exchanges by PeeringDB IX ID in a single call. "
+                "Returns one record per ID with scalar fields, ixlan_set (LAN prefix info), "
+                "and ixfac_set projected to facility id/name/city/country. "
+                "Scope annotation (ix_scope, ix_countries_present, scope_warning) is applied "
+                "automatically — check scope_warning for dispersed multi-country exchanges. "
+                "Maximum 20 IDs per call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of PeeringDB IX IDs (max 20)",
+                    },
+                },
+                "required": ["peeringdb_api_key", "ids"],
+            },
+        ),
+        types.Tool(
+            name="get_facilities_batch",
+            description=_desc(
+                "Look up multiple colocation facilities by PeeringDB facility ID in a single call. "
+                "Returns one record per ID with scalar fields (name, city, country, net_count, "
+                "ix_count, org) and ixfac_set projected to IX id/name — showing which exchanges "
+                "operate at each facility. The full network list is omitted (use "
+                "get_facility_networks for that). Maximum 20 IDs per call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    **_API_KEY_PARAM,
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of PeeringDB facility IDs (max 20)",
+                    },
+                },
+                "required": ["peeringdb_api_key", "ids"],
+            },
+        ),
         # ── Cross-object / intelligence tools ──────────────────────────────────
         types.Tool(
             name="find_common_exchanges",
             description=_desc(
                 "Find internet exchanges where two networks are both present. "
                 "Useful for identifying potential peering locations. "
-                "Returns a list of common exchanges, each with both networks' "
+                "Use detail='presence' to return only exchange-level info (name, country, "
+                "scope annotation) without per-network port entries — lower token cost. "
+                "Use detail='routing' (default) for full records including both networks' "
                 "peering IPs, port speeds, and route-server peer status."
             ),
             inputSchema={
@@ -487,6 +657,16 @@ async def list_tools() -> list[types.Tool]:
                     **_API_KEY_PARAM,
                     "asn_a": {"type": "integer", "description": "First AS number"},
                     "asn_b": {"type": "integer", "description": "Second AS number"},
+                    "detail": {
+                        "type": "string",
+                        "enum": ["presence", "routing"],
+                        "description": (
+                            "routing (default): includes each network's peering IPs, "
+                            "port speed, and RS participation at every common exchange. "
+                            "presence: exchange name, country, and scope only."
+                        ),
+                        "default": "routing",
+                    },
                 },
                 "required": ["peeringdb_api_key", "asn_a", "asn_b"],
             },
@@ -765,7 +945,13 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         ix_id = int(args["ix_id"])
         limit = int(args.get("limit", 200))
         skip = int(args.get("skip", 0))
+        detail = args.get("detail", "routing")
         rows = await queries.get_exchange_members(api_key, ix_id, limit=limit, skip=skip)
+        if detail == "presence":
+            rows = [
+                {"asn": r.get("asn"), "name": r.get("name"), "net_id": r.get("net_id")}
+                for r in rows
+            ]
         return _result({"members": rows, "limit": limit, "skip": skip,
                         "note": "Use skip to paginate"})
 
@@ -795,7 +981,18 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         fac_id = int(args["fac_id"])
         limit = int(args.get("limit", 100))
         skip = int(args.get("skip", 0))
+        detail = args.get("detail", "full")
         rows = await queries.get_facility_networks(api_key, fac_id, limit=limit, skip=skip)
+        if detail == "presence":
+            projected = []
+            for r in rows:
+                net = r.get("net") or {}
+                projected.append({
+                    "net_id": r.get("net_id"),
+                    "name": net.get("name", "") if isinstance(net, dict) else "",
+                    "asn": net.get("asn") if isinstance(net, dict) else r.get("local_asn"),
+                })
+            rows = projected
         return _result({"networks": rows, "limit": limit, "skip": skip,
                         "note": "Use skip to paginate"})
 
@@ -805,13 +1002,88 @@ async def _dispatch(name: str, args: dict, api_key: str) -> str:
         rows = await queries.get_facility_exchanges(api_key, fac_id, limit=limit)
         return _result({"exchanges": rows})
 
+    elif name == "get_networks_by_asn_batch":
+        asns = [int(a) for a in args["asns"]]
+        if not asns:
+            return _dump({"error": "asns list is empty", "tool": name})
+        if len(asns) > 20:
+            return _dump({"error": "Maximum 20 ASNs per batch request", "tool": name})
+        detail = args.get("detail", "presence")
+        network_fields = args.get("network_fields")
+        networks, ix_info, fac_info = await queries.get_networks_by_asn_batch(
+            api_key, asns, network_fields=network_fields
+        )
+        for net in networks:
+            net["netixlan_set"] = [
+                _project_netixlan(e, detail, ix_info)
+                for e in net.get("netixlan_set", [])
+            ]
+            net["netfac_set"] = [
+                _project_netfac(e, detail, fac_info)
+                for e in net.get("netfac_set", [])
+            ]
+        return _result({
+            "networks": networks,
+            "requested_count": len(asns),
+            "found_count": len(networks),
+        })
+
+    elif name == "get_exchanges_batch":
+        ids = [int(i) for i in args["ids"]]
+        if not ids:
+            return _dump({"error": "ids list is empty", "tool": name})
+        if len(ids) > 20:
+            return _dump({"error": "Maximum 20 exchange IDs per batch request", "tool": name})
+        exchanges = await queries.get_exchanges_batch(api_key, ids)
+        for ex in exchanges:
+            _annotate_ix_scope(ex)
+            ex["ixfac_set"] = [
+                {
+                    "fac_id": f.get("fac_id"),
+                    "fac_name": f.get("name", ""),
+                    "city": f.get("city", ""),
+                    "country": f.get("country", ""),
+                }
+                for f in ex.get("ixfac_set", [])
+            ]
+            for ixlan in ex.get("ixlan_set", []):
+                ixlan.pop("netixlan_set", None)
+        return _result({
+            "exchanges": exchanges,
+            "requested_count": len(ids),
+            "found_count": len(exchanges),
+        })
+
+    elif name == "get_facilities_batch":
+        ids = [int(i) for i in args["ids"]]
+        if not ids:
+            return _dump({"error": "ids list is empty", "tool": name})
+        if len(ids) > 20:
+            return _dump({"error": "Maximum 20 facility IDs per batch request", "tool": name})
+        facilities = await queries.get_facilities_batch(api_key, ids)
+        for fac in facilities:
+            fac.pop("netfac_set", None)
+            fac["ixfac_set"] = [
+                {"ix_id": f.get("ix_id"), "ix_name": f.get("name", "")}
+                for f in fac.get("ixfac_set", [])
+            ]
+        return _result({
+            "facilities": facilities,
+            "requested_count": len(ids),
+            "found_count": len(facilities),
+        })
+
     elif name == "find_common_exchanges":
         asn_a = int(args["asn_a"])
         asn_b = int(args["asn_b"])
+        detail = args.get("detail", "routing")
         rows = await queries.find_common_exchanges(api_key, asn_a, asn_b)
         for row in rows:
             _annotate_ix_scope(row)
             row.pop("ixfac_set", None)  # strip raw facility data after annotation
+            if detail == "presence":
+                row.pop("network_a_entries", None)
+                row.pop("network_b_entries", None)
         return _result({"common_exchanges": rows})
 
     elif name == "find_common_facilities":
