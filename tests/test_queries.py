@@ -709,7 +709,8 @@ _FAC_1 = {"id": 1, "name": "Equinix AM1", "city": "Amsterdam", "country": "NL"}
 @respx.mock
 async def test_get_networks_by_asn_batch_returns_networks_and_enrichment():
     with patch("asyncio.sleep"):
-        respx.get(f"{_API}/net").mock(return_value=_ok([_NET_A, _NET_B]))
+        # New implementation issues one request per ASN, not asn__in
+        respx.get(f"{_API}/net").mock(side_effect=[_ok([_NET_A]), _ok([_NET_B])])
         respx.get(f"{_API}/ix").mock(return_value=_ok([_IX_26]))
         respx.get(f"{_API}/fac").mock(return_value=_ok([_FAC_1]))
         networks, ix_info, fac_info = await queries.get_networks_by_asn_batch(_KEY, [15169, 32934])
@@ -765,14 +766,18 @@ async def test_get_networks_by_asn_batch_network_fields_added_to_request():
 
 
 @respx.mock
-async def test_get_networks_by_asn_batch_uses_asn_in_filter():
+async def test_get_networks_by_asn_batch_uses_per_asn_requests():
+    """Each ASN gets its own request — PeeringDB does not support asn__in."""
     with patch("asyncio.sleep"):
-        route = respx.get(f"{_API}/net").mock(return_value=_ok([]))
+        route = respx.get(f"{_API}/net").mock(side_effect=[_ok([_NET_A]), _ok([_NET_B])])
+        respx.get(f"{_API}/ix").mock(return_value=_ok([_IX_26]))
+        respx.get(f"{_API}/fac").mock(return_value=_ok([_FAC_1]))
         await queries.get_networks_by_asn_batch(_KEY, [15169, 32934])
-    url = str(route.calls[0].request.url)
-    assert "asn__in=" in url
-    assert "15169" in url
-    assert "32934" in url
+    assert route.call_count == 2
+    urls = [str(c.request.url) for c in route.calls]
+    assert any("asn=15169" in u for u in urls)
+    assert any("asn=32934" in u for u in urls)
+    assert not any("asn__in=" in u for u in urls)
 
 
 @respx.mock
